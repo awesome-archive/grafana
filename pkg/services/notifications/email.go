@@ -1,27 +1,30 @@
 package notifications
 
 import (
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
 )
 
+// AttachedFile struct represents email attached files.
+type AttachedFile struct {
+	Name    string
+	Content []byte
+}
+
+// Message is representation of the email message.
 type Message struct {
-	To      []string
-	From    string
-	Subject string
-	Body    string
-	Massive bool
-	Info    string
+	To            []string
+	SingleEmail   bool
+	From          string
+	Subject       string
+	Body          string
+	Info          string
+	ReplyTo       []string
+	EmbeddedFiles []string
+	AttachedFiles []*AttachedFile
 }
 
-// create mail content
-func (m *Message) Content() string {
-	contentType := "text/html; charset=UTF-8"
-	content := "From: " + m.From + "\r\nSubject: " + m.Subject + "\r\nContent-Type: " + contentType + "\r\n\r\n" + m.Body
-	return content
-}
-
-func setDefaultTemplateData(data map[string]interface{}, u *m.User) {
+func setDefaultTemplateData(data map[string]interface{}, u *models.User) {
 	data["AppUrl"] = setting.AppUrl
 	data["BuildVersion"] = setting.BuildVersion
 	data["BuildStamp"] = setting.BuildStamp

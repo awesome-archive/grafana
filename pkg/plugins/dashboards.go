@@ -6,7 +6,7 @@ import (
 
 	"github.com/grafana/grafana/pkg/bus"
 	"github.com/grafana/grafana/pkg/components/simplejson"
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/models"
 )
 
 type PluginDashboardInfoDTO struct {
@@ -14,7 +14,10 @@ type PluginDashboardInfoDTO struct {
 	Title            string `json:"title"`
 	Imported         bool   `json:"imported"`
 	ImportedUri      string `json:"importedUri"`
+	ImportedUrl      string `json:"importedUrl"`
 	Slug             string `json:"slug"`
+	DashboardId      int64  `json:"dashboardId"`
+	FolderId         int64  `json:"folderId"`
 	ImportedRevision int64  `json:"importedRevision"`
 	Revision         int64  `json:"revision"`
 	Description      string `json:"description"`
@@ -32,7 +35,7 @@ func GetPluginDashboards(orgId int64, pluginId string) ([]*PluginDashboardInfoDT
 	result := make([]*PluginDashboardInfoDTO, 0)
 
 	// load current dashboards
-	query := m.GetDashboardsByPluginIdQuery{OrgId: orgId, PluginId: pluginId}
+	query := models.GetDashboardsByPluginIdQuery{OrgId: orgId, PluginId: pluginId}
 	if err := bus.Dispatch(&query); err != nil {
 		return nil, err
 	}
@@ -45,7 +48,7 @@ func GetPluginDashboards(orgId int64, pluginId string) ([]*PluginDashboardInfoDT
 		}
 
 		res := &PluginDashboardInfoDTO{}
-		var dashboard *m.Dashboard
+		var dashboard *models.Dashboard
 		var err error
 
 		if dashboard, err = loadPluginDashboard(plugin.Id, include.Path); err != nil {
@@ -60,8 +63,10 @@ func GetPluginDashboards(orgId int64, pluginId string) ([]*PluginDashboardInfoDT
 		// find existing dashboard
 		for _, existingDash := range query.Result {
 			if existingDash.Slug == dashboard.Slug {
+				res.DashboardId = existingDash.Id
 				res.Imported = true
 				res.ImportedUri = "db/" + existingDash.Slug
+				res.ImportedUrl = existingDash.GetUrl()
 				res.ImportedRevision = existingDash.Data.Get("revision").MustInt64(1)
 				existingMatches[existingDash.Id] = true
 			}
@@ -74,8 +79,9 @@ func GetPluginDashboards(orgId int64, pluginId string) ([]*PluginDashboardInfoDT
 	for _, dash := range query.Result {
 		if _, exists := existingMatches[dash.Id]; !exists {
 			result = append(result, &PluginDashboardInfoDTO{
-				Slug:    dash.Slug,
-				Removed: true,
+				Slug:        dash.Slug,
+				DashboardId: dash.Id,
+				Removed:     true,
 			})
 		}
 	}
@@ -83,25 +89,32 @@ func GetPluginDashboards(orgId int64, pluginId string) ([]*PluginDashboardInfoDT
 	return result, nil
 }
 
-func loadPluginDashboard(pluginId, path string) (*m.Dashboard, error) {
+func loadPluginDashboard(pluginId, path string) (*models.Dashboard, error) {
 	plugin, exists := Plugins[pluginId]
-
 	if !exists {
 		return nil, PluginNotFoundError{pluginId}
 	}
 
 	dashboardFilePath := filepath.Join(plugin.PluginDir, path)
+	// nolint:gosec
+	// We can ignore the gosec G304 warning on this one because `plugin.PluginDir` is based
+	// on plugin folder structure on disk and not user input. `path` comes from the
+	// `plugin.json` configuration file for the loaded plugin
 	reader, err := os.Open(dashboardFilePath)
 	if err != nil {
 		return nil, err
 	}
 
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			plog.Warn("Failed to close file", "path", dashboardFilePath, "err", err)
+		}
+	}()
 
 	data, err := simplejson.NewFromReader(reader)
 	if err != nil {
 		return nil, err
 	}
 
-	return m.NewDashboardFromJson(data), nil
+	return models.NewDashboardFromJson(data), nil
 }

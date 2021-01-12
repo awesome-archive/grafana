@@ -1,14 +1,22 @@
-///<reference path="../../headers/common.d.ts" />
-
-import config from 'app/core/config';
+import config from '../../core/config';
 import _ from 'lodash';
 import coreModule from 'app/core/core_module';
-import store from 'app/core/store';
+import { rangeUtil } from '@grafana/data';
 
 export class User {
+  id: number;
   isGrafanaAdmin: any;
   isSignedIn: any;
   orgRole: any;
+  orgId: number;
+  orgName: string;
+  login: string;
+  orgCount: number;
+  timezone: string;
+  helpFlags1: number;
+  lightTheme: boolean;
+  hasEditPermissionInFolders: boolean;
+  email?: string;
 
   constructor() {
     if (config.bootData.user) {
@@ -24,48 +32,54 @@ export class ContextSrv {
   isSignedIn: any;
   isGrafanaAdmin: any;
   isEditor: any;
-  sidemenu: any;
+  sidemenuSmallBreakpoint = false;
+  hasEditPermissionInFolders: boolean;
+  minRefreshInterval: string;
 
   constructor() {
-    this.pinned = store.getBool('grafana.sidemenu.pinned', false);
-    if (this.pinned) {
-      this.sidemenu = true;
-    }
-
-    if (!config.buildInfo) {
-      config.buildInfo = {};
-    }
     if (!config.bootData) {
-      config.bootData = {user: {}, settings: {}};
+      config.bootData = { user: {}, settings: {} };
     }
 
-    this.version = config.buildInfo.version;
     this.user = new User();
     this.isSignedIn = this.user.isSignedIn;
     this.isGrafanaAdmin = this.user.isGrafanaAdmin;
     this.isEditor = this.hasRole('Editor') || this.hasRole('Admin');
+    this.hasEditPermissionInFolders = this.user.hasEditPermissionInFolders;
+    this.minRefreshInterval = config.minRefreshInterval;
   }
 
-  hasRole(role) {
+  hasRole(role: string) {
     return this.user.orgRole === role;
   }
 
-  setPinnedState(val) {
-    this.pinned = val;
-    store.set('grafana.sidemenu.pinned', val);
+  isGrafanaVisible() {
+    return !!(document.visibilityState === undefined || document.visibilityState === 'visible');
   }
 
-  toggleSideMenu() {
-    this.sidemenu = !this.sidemenu;
-    if (!this.sidemenu) {
-      this.setPinnedState(false);
+  // checks whether the passed interval is longer than the configured minimum refresh rate
+  isAllowedInterval(interval: string) {
+    if (!config.minRefreshInterval) {
+      return true;
     }
+    return rangeUtil.intervalToMs(interval) >= rangeUtil.intervalToMs(config.minRefreshInterval);
+  }
+
+  getValidInterval(interval: string) {
+    if (!this.isAllowedInterval(interval)) {
+      return config.minRefreshInterval;
+    }
+    return interval;
+  }
+
+  hasAccessToExplore() {
+    return (this.isEditor || config.viewersCanEdit) && config.exploreEnabled;
   }
 }
 
-var contextSrv = new ContextSrv();
-export {contextSrv};
+const contextSrv = new ContextSrv();
+export { contextSrv };
 
-coreModule.factory('contextSrv', function() {
+coreModule.factory('contextSrv', () => {
   return contextSrv;
 });

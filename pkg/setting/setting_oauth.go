@@ -5,14 +5,22 @@ type OAuthInfo struct {
 	Scopes                 []string
 	AuthUrl, TokenUrl      string
 	Enabled                bool
+	EmailAttributeName     string
+	EmailAttributePath     string
+	RoleAttributePath      string
 	AllowedDomains         []string
+	HostedDomain           string
 	ApiUrl                 string
 	AllowSignup            bool
+	Name                   string
+	TlsClientCert          string
+	TlsClientKey           string
+	TlsClientCa            string
+	TlsSkipVerify          bool
 }
 
 type OAuther struct {
-	GitHub, Google, Twitter bool
-	OAuthInfos              map[string]*OAuthInfo
+	OAuthInfos map[string]*OAuthInfo
 }
 
 var OAuthService *OAuther

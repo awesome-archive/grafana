@@ -1,126 +1,88 @@
-///<reference path="../../headers/common.d.ts" />
-
-import config from 'app/core/config';
 import _ from 'lodash';
-import angular from 'angular';
-import $ from 'jquery';
-import {profiler} from 'app/core/profiler';
-
-const TITLE_HEIGHT = 25;
-const EMPTY_TITLE_HEIGHT = 9;
-const PANEL_PADDING = 5;
-const PANEL_BORDER = 2;
-
-import {Emitter} from 'app/core/core';
+import config from 'app/core/config';
+import { profiler } from 'app/core/core';
+import { auto } from 'angular';
+import {
+  AppEvent,
+  PanelEvents,
+  PanelPluginMeta,
+  AngularPanelMenuItem,
+  EventBusExtended,
+  EventBusSrv,
+} from '@grafana/data';
+import { DashboardModel } from '../dashboard/state';
 
 export class PanelCtrl {
   panel: any;
-  row: any;
-  dashboard: any;
-  editorTabIndex: number;
+  error: any;
+  dashboard: DashboardModel;
   pluginName: string;
   pluginId: string;
   editorTabs: any;
   $scope: any;
-  $injector: any;
+  $injector: auto.IInjectorService;
+  $location: any;
   $timeout: any;
-  fullscreen: boolean;
-  inspector: any;
   editModeInitiated: boolean;
-  editorHelpIndex: number;
-  editMode: any;
-  height: any;
+  height: number;
+  width: number;
   containerHeight: any;
-  events: Emitter;
+  events: EventBusExtended;
+  loading: boolean;
   timing: any;
 
-  constructor($scope, $injector) {
+  constructor($scope: any, $injector: auto.IInjectorService) {
     this.$injector = $injector;
+    this.$location = $injector.get('$location');
     this.$scope = $scope;
     this.$timeout = $injector.get('$timeout');
-    this.editorTabIndex = 0;
-    this.events = new Emitter();
-    this.timing = {};
+    this.editorTabs = [];
+    this.events = new EventBusSrv();
+    this.timing = {}; // not used but here to not break plugins
 
-    var plugin = config.panels[this.panel.type];
+    const plugin = config.panels[this.panel.type];
     if (plugin) {
       this.pluginId = plugin.id;
       this.pluginName = plugin.name;
     }
 
-    $scope.$on("refresh", () => this.refresh());
-    $scope.$on("render", () => this.render());
-    $scope.$on("$destroy", () => this.events.emit('panel-teardown'));
+    $scope.$on(PanelEvents.componentDidMount.name, () => this.panelDidMount());
   }
 
-  init() {
-    this.calculatePanelHeight();
-    this.publishAppEvent('panel-initialized', {scope: this.$scope});
-    this.events.emit('panel-initialized');
+  panelDidMount() {
+    this.events.emit(PanelEvents.componentDidMount);
+    this.events.emit(PanelEvents.initialized);
+    this.dashboard.panelInitialized(this.panel);
   }
 
   renderingCompleted() {
-    profiler.renderingCompleted(this.panel.id, this.timing);
+    profiler.renderingCompleted();
   }
 
   refresh() {
-    this.events.emit('refresh', null);
+    this.panel.refresh();
   }
 
-  publishAppEvent(evtName, evt) {
-    this.$scope.$root.appEvent(evtName, evt);
-  }
-
-  changeView(fullscreen, edit) {
-    this.publishAppEvent('panel-change-view', {
-      fullscreen: fullscreen, edit: edit, panelId: this.panel.id
-    });
-  }
-
-  viewPanel() {
-    this.changeView(true, false);
-  }
-
-  editPanel() {
-    this.changeView(true, true);
-  }
-
-  exitFullscreen() {
-    this.changeView(false, false);
+  publishAppEvent<T>(event: AppEvent<T>, payload?: T) {
+    this.$scope.$root.appEvent(event, payload);
   }
 
   initEditMode() {
-    this.editorTabs = [];
-    this.addEditorTab('General', 'public/app/partials/panelgeneral.html');
-    this.editModeInitiated = true;
-    this.events.emit('init-edit-mode', null);
-
-    var routeParams = this.$injector.get('$routeParams');
-    if (routeParams.editorTab) {
-      this.editorTabs.forEach((tab, i) => {
-        if (tab.title === routeParams.editorTab) {
-          this.editorTabIndex = i;
-        }
-      });
+    if (!this.editModeInitiated) {
+      this.editModeInitiated = true;
+      this.events.emit(PanelEvents.editModeInitialized);
     }
   }
 
-  changeTab(newIndex) {
-    this.editorTabIndex = newIndex;
-    var route = this.$injector.get('$route');
-
-    route.current.params.editorTab = this.editorTabs[newIndex].title;
-    route.updateParams();
-  }
-
-  addEditorTab(title, directiveFn, index?) {
-    var editorTab = {title, directiveFn};
+  addEditorTab(title: string, directiveFn: any, index?: number, icon?: any) {
+    const editorTab = { title, directiveFn, icon };
 
     if (_.isString(directiveFn)) {
-      editorTab.directiveFn = function() {
-        return {templateUrl: directiveFn};
+      editorTab.directiveFn = () => {
+        return { templateUrl: directiveFn };
       };
     }
+
     if (index) {
       this.editorTabs.splice(index, 0, editorTab);
     } else {
@@ -128,125 +90,25 @@ export class PanelCtrl {
     }
   }
 
-  getMenu() {
-    let menu = [];
-    menu.push({text: 'View', click: 'ctrl.viewPanel(); dismiss();'});
-    menu.push({text: 'Edit', click: 'ctrl.editPanel(); dismiss();', role: 'Editor'});
-    if (!this.fullscreen) { //  duplication is not supported in fullscreen mode
-      menu.push({ text: 'Duplicate', click: 'ctrl.duplicate()', role: 'Editor' });
-    }
-    menu.push({text: 'Share', click: 'ctrl.sharePanel(); dismiss();'});
+  getExtendedMenu() {
+    const menu: AngularPanelMenuItem[] = [];
+    this.events.emit(PanelEvents.initPanelActions, menu);
     return menu;
   }
 
-  getExtendedMenu() {
-    var actions = [{text: 'Panel JSON', click: 'ctrl.editPanelJson(); dismiss();'}];
-    this.events.emit('init-panel-actions', actions);
-    return actions;
+  // Override in sub-class to add items before extended menu
+  async getAdditionalMenuItems(): Promise<any[]> {
+    return [];
   }
 
   otherPanelInFullscreenMode() {
-    return this.dashboard.meta.fullscreen && !this.fullscreen;
+    return this.dashboard.otherPanelInFullscreen(this.panel);
   }
 
-  calculatePanelHeight() {
-    if (this.fullscreen) {
-      var docHeight = $(window).height();
-      var editHeight = Math.floor(docHeight * 0.3);
-      var fullscreenHeight = Math.floor(docHeight * 0.7);
-      this.containerHeight = this.editMode ? editHeight : fullscreenHeight;
-    } else {
-      this.containerHeight = this.panel.height || this.row.height;
-      if (_.isString(this.containerHeight)) {
-        this.containerHeight = parseInt(this.containerHeight.replace('px', ''), 10);
-      }
-    }
-
-    this.height = this.containerHeight - (PANEL_BORDER + PANEL_PADDING + (this.panel.title ? TITLE_HEIGHT : EMPTY_TITLE_HEIGHT));
+  render(payload?: any) {
+    this.events.emit(PanelEvents.render, payload);
   }
 
-  render(payload?) {
-    // ignore if other panel is in fullscreen mode
-    if (this.otherPanelInFullscreenMode()) {
-      return;
-    }
-
-    this.calculatePanelHeight();
-    this.timing.renderStart = new Date().getTime();
-    this.events.emit('render', payload);
-  }
-
-  toggleEditorHelp(index) {
-    if (this.editorHelpIndex === index) {
-      this.editorHelpIndex = null;
-      return;
-    }
-    this.editorHelpIndex = index;
-  }
-
-  duplicate() {
-    this.dashboard.duplicatePanel(this.panel, this.row);
-  }
-
-  updateColumnSpan(span) {
-    this.panel.span = Math.min(Math.max(Math.floor(this.panel.span + span), 1), 12);
-    this.$timeout(() => {
-      this.render();
-    });
-  }
-
-  removePanel() {
-    this.publishAppEvent('confirm-modal', {
-      title: 'Remove Panel',
-      text: 'Are you sure you want to remove this panel?',
-      icon: 'fa-trash',
-      yesText: 'Remove',
-      onConfirm: () => {
-        this.row.panels = _.without(this.row.panels, this.panel);
-      }
-    });
-  }
-
-  editPanelJson() {
-    this.publishAppEvent('show-json-editor', {
-      object: this.panel,
-      updateHandler: this.replacePanel.bind(this)
-    });
-  }
-
-  replacePanel(newPanel, oldPanel) {
-    var row = this.row;
-    var index = _.indexOf(this.row.panels, oldPanel);
-    this.row.panels.splice(index, 1);
-
-    // adding it back needs to be done in next digest
-    this.$timeout(() => {
-      newPanel.id = oldPanel.id;
-      newPanel.span = oldPanel.span;
-      this.row.panels.splice(index, 0, newPanel);
-    });
-  }
-
-  sharePanel() {
-    var shareScope = this.$scope.$new();
-    shareScope.panel = this.panel;
-    shareScope.dashboard = this.dashboard;
-
-    this.publishAppEvent('show-modal', {
-      src: 'public/app/features/dashboard/partials/shareModal.html',
-      scope: shareScope
-    });
-  }
-
-  openInspector() {
-    var modalScope = this.$scope.$new();
-    modalScope.panel = this.panel;
-    modalScope.dashboard = this.dashboard;
-    modalScope.inspector = angular.copy(this.inspector);
-
-    this.publishAppEvent('show-modal', {
-      src: 'public/app/partials/inspector.html',
-      scope: modalScope
-    });
-  }
+  // overriden from react
+  onPluginTypeChange = (plugin: PanelPluginMeta) => {};
 }

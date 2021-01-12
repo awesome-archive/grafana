@@ -1,16 +1,18 @@
+// +build integration
+
 package sqlstore
 
 import (
 	"testing"
+	"time"
 
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
 func TestQuotaCommandsAndQueries(t *testing.T) {
-
-	Convey("Testing Qutoa commands & queries", t, func() {
+	Convey("Testing Quota commands & queries", t, func() {
 		InitTestDB(t)
 		userId := int64(1)
 		orgId := int64(0)
@@ -39,16 +41,17 @@ func TestQuotaCommandsAndQueries(t *testing.T) {
 		// create a new org and add user_id 1 as admin.
 		// we will then have an org with 1 user. and a user
 		// with 1 org.
-		userCmd := m.CreateOrgCommand{
+		userCmd := models.CreateOrgCommand{
 			Name:   "TestOrg",
 			UserId: 1,
 		}
+
 		err := CreateOrg(&userCmd)
 		So(err, ShouldBeNil)
 		orgId = userCmd.Result.Id
 
 		Convey("Given saved org quota for users", func() {
-			orgCmd := m.UpdateOrgQuotaCmd{
+			orgCmd := models.UpdateOrgQuotaCmd{
 				OrgId:  orgId,
 				Target: "org_user",
 				Limit:  10,
@@ -57,91 +60,90 @@ func TestQuotaCommandsAndQueries(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			Convey("Should be able to get saved quota by org id and target", func() {
-				query := m.GetOrgQuotaByTargetQuery{OrgId: orgId, Target: "org_user", Default: 1}
+				query := models.GetOrgQuotaByTargetQuery{OrgId: orgId, Target: "org_user", Default: 1}
 				err = GetOrgQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Limit, ShouldEqual, 10)
 			})
 			Convey("Should be able to get default quota by org id and target", func() {
-				query := m.GetOrgQuotaByTargetQuery{OrgId: 123, Target: "org_user", Default: 11}
+				query := models.GetOrgQuotaByTargetQuery{OrgId: 123, Target: "org_user", Default: 11}
 				err = GetOrgQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Limit, ShouldEqual, 11)
 			})
 			Convey("Should be able to get used org quota when rows exist", func() {
-				query := m.GetOrgQuotaByTargetQuery{OrgId: orgId, Target: "org_user", Default: 11}
+				query := models.GetOrgQuotaByTargetQuery{OrgId: orgId, Target: "org_user", Default: 11}
 				err = GetOrgQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Used, ShouldEqual, 1)
 			})
 			Convey("Should be able to get used org quota when no rows exist", func() {
-				query := m.GetOrgQuotaByTargetQuery{OrgId: 2, Target: "org_user", Default: 11}
+				query := models.GetOrgQuotaByTargetQuery{OrgId: 2, Target: "org_user", Default: 11}
 				err = GetOrgQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Used, ShouldEqual, 0)
 			})
 			Convey("Should be able to quota list for org", func() {
-				query := m.GetOrgQuotasQuery{OrgId: orgId}
+				query := models.GetOrgQuotasQuery{OrgId: orgId}
 				err = GetOrgQuotas(&query)
 
 				So(err, ShouldBeNil)
 				So(len(query.Result), ShouldEqual, 4)
 				for _, res := range query.Result {
-					limit := 5 //default quota limit
+					limit := 5 // default quota limit
 					used := 0
 					if res.Target == "org_user" {
-						limit = 10 //customized quota limit.
+						limit = 10 // customized quota limit.
 						used = 1
 					}
 					So(res.Limit, ShouldEqual, limit)
 					So(res.Used, ShouldEqual, used)
-
 				}
 			})
 		})
 		Convey("Given saved user quota for org", func() {
-			userQoutaCmd := m.UpdateUserQuotaCmd{
+			userQuotaCmd := models.UpdateUserQuotaCmd{
 				UserId: userId,
 				Target: "org_user",
 				Limit:  10,
 			}
-			err := UpdateUserQuota(&userQoutaCmd)
+			err := UpdateUserQuota(&userQuotaCmd)
 			So(err, ShouldBeNil)
 
 			Convey("Should be able to get saved quota by user id and target", func() {
-				query := m.GetUserQuotaByTargetQuery{UserId: userId, Target: "org_user", Default: 1}
+				query := models.GetUserQuotaByTargetQuery{UserId: userId, Target: "org_user", Default: 1}
 				err = GetUserQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Limit, ShouldEqual, 10)
 			})
 			Convey("Should be able to get default quota by user id and target", func() {
-				query := m.GetUserQuotaByTargetQuery{UserId: 9, Target: "org_user", Default: 11}
+				query := models.GetUserQuotaByTargetQuery{UserId: 9, Target: "org_user", Default: 11}
 				err = GetUserQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Limit, ShouldEqual, 11)
 			})
 			Convey("Should be able to get used user quota when rows exist", func() {
-				query := m.GetUserQuotaByTargetQuery{UserId: userId, Target: "org_user", Default: 11}
+				query := models.GetUserQuotaByTargetQuery{UserId: userId, Target: "org_user", Default: 11}
 				err = GetUserQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Used, ShouldEqual, 1)
 			})
 			Convey("Should be able to get used user quota when no rows exist", func() {
-				query := m.GetUserQuotaByTargetQuery{UserId: 2, Target: "org_user", Default: 11}
+				query := models.GetUserQuotaByTargetQuery{UserId: 2, Target: "org_user", Default: 11}
 				err = GetUserQuotaByTarget(&query)
 
 				So(err, ShouldBeNil)
 				So(query.Result.Used, ShouldEqual, 0)
 			})
 			Convey("Should be able to quota list for user", func() {
-				query := m.GetUserQuotasQuery{UserId: userId}
+				query := models.GetUserQuotasQuery{UserId: userId}
 				err = GetUserQuotas(&query)
 
 				So(err, ShouldBeNil)
@@ -152,7 +154,7 @@ func TestQuotaCommandsAndQueries(t *testing.T) {
 		})
 
 		Convey("Should be able to global user quota", func() {
-			query := m.GetGlobalQuotaByTargetQuery{Target: "user", Default: 5}
+			query := models.GetGlobalQuotaByTargetQuery{Target: "user", Default: 5}
 			err = GetGlobalQuotaByTarget(&query)
 			So(err, ShouldBeNil)
 
@@ -160,12 +162,76 @@ func TestQuotaCommandsAndQueries(t *testing.T) {
 			So(query.Result.Used, ShouldEqual, 0)
 		})
 		Convey("Should be able to global org quota", func() {
-			query := m.GetGlobalQuotaByTargetQuery{Target: "org", Default: 5}
+			query := models.GetGlobalQuotaByTargetQuery{Target: "org", Default: 5}
 			err = GetGlobalQuotaByTarget(&query)
 			So(err, ShouldBeNil)
 
 			So(query.Result.Limit, ShouldEqual, 5)
 			So(query.Result.Used, ShouldEqual, 1)
+		})
+
+		// related: https://github.com/grafana/grafana/issues/14342
+		Convey("Should org quota updating is successful even if it called multiple time", func() {
+			orgCmd := models.UpdateOrgQuotaCmd{
+				OrgId:  orgId,
+				Target: "org_user",
+				Limit:  5,
+			}
+			err := UpdateOrgQuota(&orgCmd)
+			So(err, ShouldBeNil)
+
+			query := models.GetOrgQuotaByTargetQuery{OrgId: orgId, Target: "org_user", Default: 1}
+			err = GetOrgQuotaByTarget(&query)
+			So(err, ShouldBeNil)
+			So(query.Result.Limit, ShouldEqual, 5)
+
+			// XXX: resolution of `Updated` column is 1sec, so this makes delay
+			time.Sleep(1 * time.Second)
+
+			orgCmd = models.UpdateOrgQuotaCmd{
+				OrgId:  orgId,
+				Target: "org_user",
+				Limit:  10,
+			}
+			err = UpdateOrgQuota(&orgCmd)
+			So(err, ShouldBeNil)
+
+			query = models.GetOrgQuotaByTargetQuery{OrgId: orgId, Target: "org_user", Default: 1}
+			err = GetOrgQuotaByTarget(&query)
+			So(err, ShouldBeNil)
+			So(query.Result.Limit, ShouldEqual, 10)
+		})
+
+		// related: https://github.com/grafana/grafana/issues/14342
+		Convey("Should user quota updating is successful even if it called multiple time", func() {
+			userQuotaCmd := models.UpdateUserQuotaCmd{
+				UserId: userId,
+				Target: "org_user",
+				Limit:  5,
+			}
+			err := UpdateUserQuota(&userQuotaCmd)
+			So(err, ShouldBeNil)
+
+			query := models.GetUserQuotaByTargetQuery{UserId: userId, Target: "org_user", Default: 1}
+			err = GetUserQuotaByTarget(&query)
+			So(err, ShouldBeNil)
+			So(query.Result.Limit, ShouldEqual, 5)
+
+			// XXX: resolution of `Updated` column is 1sec, so this makes delay
+			time.Sleep(1 * time.Second)
+
+			userQuotaCmd = models.UpdateUserQuotaCmd{
+				UserId: userId,
+				Target: "org_user",
+				Limit:  10,
+			}
+			err = UpdateUserQuota(&userQuotaCmd)
+			So(err, ShouldBeNil)
+
+			query = models.GetUserQuotaByTargetQuery{UserId: userId, Target: "org_user", Default: 1}
+			err = GetUserQuotaByTarget(&query)
+			So(err, ShouldBeNil)
+			So(query.Result.Limit, ShouldEqual, 10)
 		})
 	})
 }

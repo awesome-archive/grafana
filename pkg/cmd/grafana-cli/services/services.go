@@ -1,69 +1,98 @@
 package services
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
+	"net"
+	"net/http"
+	"path/filepath"
+	"time"
 
-	"github.com/franela/goreq"
 	"github.com/grafana/grafana/pkg/cmd/grafana-cli/logger"
-	m "github.com/grafana/grafana/pkg/cmd/grafana-cli/models"
+	"github.com/grafana/grafana/pkg/cmd/grafana-cli/models"
 )
 
-var IoHelper m.IoUtil = IoUtilImp{}
+var (
+	IoHelper            models.IoUtil = IoUtilImp{}
+	HttpClient          http.Client
+	HttpClientNoTimeout http.Client
+	grafanaVersion      string
+	ErrNotFoundError    = errors.New("404 not found error")
+)
 
-func ListAllPlugins(repoUrl string) (m.PluginRepo, error) {
-	fullUrl := repoUrl + "/repo"
-	res, err := goreq.Request{Uri: fullUrl, MaxRedirects: 3}.Do()
-	if err != nil {
-		return m.PluginRepo{}, err
-	}
-	if res.StatusCode != 200 {
-		return m.PluginRepo{}, fmt.Errorf("Could not access %s statuscode %v", fullUrl, res.StatusCode)
-	}
-
-	var resp m.PluginRepo
-	err = res.Body.FromJsonTo(&resp)
-	if err != nil {
-		return m.PluginRepo{}, errors.New("Could not load plugin data")
-	}
-
-	return resp, nil
+type BadRequestError struct {
+	Message string
+	Status  string
 }
 
-func ReadPlugin(pluginDir, pluginName string) (m.InstalledPlugin, error) {
-	distPluginDataPath := path.Join(pluginDir, pluginName, "dist", "plugin.json")
+func (e *BadRequestError) Error() string {
+	if len(e.Message) > 0 {
+		return fmt.Sprintf("%s: %s", e.Status, e.Message)
+	}
+	return e.Status
+}
 
-	var data []byte
-	var err error
-	data, err = IoHelper.ReadFile(distPluginDataPath)
+func Init(version string, skipTLSVerify bool) {
+	grafanaVersion = version
 
+	HttpClient = makeHttpClient(skipTLSVerify, 10*time.Second)
+	HttpClientNoTimeout = makeHttpClient(skipTLSVerify, 0)
+}
+
+func makeHttpClient(skipTLSVerify bool, timeout time.Duration) http.Client {
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: skipTLSVerify,
+		},
+	}
+
+	return http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+	}
+}
+
+func ReadPlugin(pluginDir, pluginName string) (models.InstalledPlugin, error) {
+	distPluginDataPath := filepath.Join(pluginDir, pluginName, "dist", "plugin.json")
+
+	data, err := IoHelper.ReadFile(distPluginDataPath)
 	if err != nil {
-		pluginDataPath := path.Join(pluginDir, pluginName, "plugin.json")
+		pluginDataPath := filepath.Join(pluginDir, pluginName, "plugin.json")
 		data, err = IoHelper.ReadFile(pluginDataPath)
-
 		if err != nil {
-			return m.InstalledPlugin{}, errors.New("Could not find dist/plugin.json or plugin.json on  " + pluginName + " in " + pluginDir)
+			return models.InstalledPlugin{}, errors.New("Could not find dist/plugin.json or plugin.json on  " + pluginName + " in " + pluginDir)
 		}
 	}
 
-	res := m.InstalledPlugin{}
-	json.Unmarshal(data, &res)
+	res := models.InstalledPlugin{}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return res, err
+	}
 
 	if res.Info.Version == "" {
 		res.Info.Version = "0.0.0"
 	}
 
-	if res.Id == "" {
-		return m.InstalledPlugin{}, errors.New("could not find plugin " + pluginName + " in " + pluginDir)
+	if res.ID == "" {
+		return models.InstalledPlugin{}, errors.New("could not find plugin " + pluginName + " in " + pluginDir)
 	}
 
 	return res, nil
 }
 
-func GetLocalPlugins(pluginDir string) []m.InstalledPlugin {
-	result := make([]m.InstalledPlugin, 0)
+func GetLocalPlugins(pluginDir string) []models.InstalledPlugin {
+	result := make([]models.InstalledPlugin, 0)
 	files, _ := IoHelper.ReadDir(pluginDir)
 	for _, f := range files {
 		res, err := ReadPlugin(pluginDir, f.Name())
@@ -77,7 +106,7 @@ func GetLocalPlugins(pluginDir string) []m.InstalledPlugin {
 
 func RemoveInstalledPlugin(pluginPath, pluginName string) error {
 	logger.Infof("Removing plugin: %v\n", pluginName)
-	pluginDir := path.Join(pluginPath, pluginName)
+	pluginDir := filepath.Join(pluginPath, pluginName)
 
 	_, err := IoHelper.Stat(pluginDir)
 	if err != nil {
@@ -85,24 +114,4 @@ func RemoveInstalledPlugin(pluginPath, pluginName string) error {
 	}
 
 	return IoHelper.RemoveAll(pluginDir)
-}
-
-func GetPlugin(pluginId, repoUrl string) (m.Plugin, error) {
-	fullUrl := repoUrl + "/repo/" + pluginId
-
-	res, err := goreq.Request{Uri: fullUrl, MaxRedirects: 3}.Do()
-	if err != nil {
-		return m.Plugin{}, err
-	}
-	if res.StatusCode != 200 {
-		return m.Plugin{}, fmt.Errorf("Could not access %s statuscode %v", fullUrl, res.StatusCode)
-	}
-
-	var resp m.Plugin
-	err = res.Body.FromJsonTo(&resp)
-	if err != nil {
-		return m.Plugin{}, errors.New("Could not load plugin data")
-	}
-
-	return resp, nil
 }

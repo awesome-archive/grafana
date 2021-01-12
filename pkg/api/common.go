@@ -4,23 +4,23 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/grafana/grafana/pkg/metrics"
-	"github.com/grafana/grafana/pkg/middleware"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
 	"gopkg.in/macaron.v1"
 )
 
 var (
-	NotFound = func() Response {
-		return ApiError(404, "Not found", nil)
-	}
 	ServerError = func(err error) Response {
-		return ApiError(500, "Server error", err)
+		return Error(500, "Server error", err)
 	}
 )
 
 type Response interface {
-	WriteTo(ctx *middleware.Context)
+	WriteTo(ctx *models.ReqContext)
+	// Status gets the response's status.
+	Status() int
+	// Body gets the response's body.
+	Body() []byte
 }
 
 type NormalResponse struct {
@@ -31,9 +31,8 @@ type NormalResponse struct {
 	err        error
 }
 
-func wrap(action interface{}) macaron.Handler {
-
-	return func(c *middleware.Context) {
+func Wrap(action interface{}) macaron.Handler {
+	return func(c *models.ReqContext) {
 		var res Response
 		val, err := c.Invoke(action)
 		if err == nil && val != nil && len(val) > 0 {
@@ -46,9 +45,19 @@ func wrap(action interface{}) macaron.Handler {
 	}
 }
 
-func (r *NormalResponse) WriteTo(ctx *middleware.Context) {
+// Status gets the response's status.
+func (r *NormalResponse) Status() int {
+	return r.status
+}
+
+// Body gets the response's body.
+func (r *NormalResponse) Body() []byte {
+	return r.body
+}
+
+func (r *NormalResponse) WriteTo(ctx *models.ReqContext) {
 	if r.err != nil {
-		ctx.Logger.Error(r.errMessage, "error", r.err)
+		ctx.Logger.Error(r.errMessage, "error", r.err, "remote_addr", ctx.RemoteAddr())
 	}
 
 	header := ctx.Resp.Header()
@@ -56,11 +65,9 @@ func (r *NormalResponse) WriteTo(ctx *middleware.Context) {
 		header[k] = v
 	}
 	ctx.Resp.WriteHeader(r.status)
-	ctx.Resp.Write(r.body)
-}
-
-func (r *NormalResponse) Cache(ttl string) *NormalResponse {
-	return r.Header("Cache-Control", "public,max-age="+ttl)
+	if _, err := ctx.Resp.Write(r.body); err != nil {
+		ctx.Logger.Error("Error writing to response", "err", err)
+	}
 }
 
 func (r *NormalResponse) Header(key, value string) *NormalResponse {
@@ -68,30 +75,31 @@ func (r *NormalResponse) Header(key, value string) *NormalResponse {
 	return r
 }
 
-// functions to create responses
+// Empty creates an empty response.
 func Empty(status int) *NormalResponse {
 	return Respond(status, nil)
 }
 
-func Json(status int, body interface{}) *NormalResponse {
+// JSON create a JSON response
+func JSON(status int, body interface{}) *NormalResponse {
 	return Respond(status, body).Header("Content-Type", "application/json")
 }
 
-func ApiSuccess(message string) *NormalResponse {
+// Success create a successful response
+func Success(message string) *NormalResponse {
 	resp := make(map[string]interface{})
 	resp["message"] = message
-	return Respond(200, resp)
+	return JSON(200, resp)
 }
 
-func ApiError(status int, message string, err error) *NormalResponse {
+// Error creates an error response.
+func Error(status int, message string, err error) *NormalResponse {
 	data := make(map[string]interface{})
 
 	switch status {
 	case 404:
-		metrics.M_Api_Status_404.Inc(1)
 		data["message"] = "Not Found"
 	case 500:
-		metrics.M_Api_Status_500.Inc(1)
 		data["message"] = "Internal Server Error"
 	}
 
@@ -100,12 +108,12 @@ func ApiError(status int, message string, err error) *NormalResponse {
 	}
 
 	if err != nil {
-		if setting.Env != setting.PROD {
+		if setting.Env != setting.Prod {
 			data["error"] = err.Error()
 		}
 	}
 
-	resp := Json(status, data)
+	resp := JSON(status, data)
 
 	if err != nil {
 		resp.errMessage = message
@@ -115,6 +123,7 @@ func ApiError(status int, message string, err error) *NormalResponse {
 	return resp
 }
 
+// Respond create a response
 func Respond(status int, body interface{}) *NormalResponse {
 	var b []byte
 	var err error
@@ -125,7 +134,7 @@ func Respond(status int, body interface{}) *NormalResponse {
 		b = []byte(t)
 	default:
 		if b, err = json.Marshal(body); err != nil {
-			return ApiError(500, "body json marshal", err)
+			return Error(500, "body json marshal", err)
 		}
 	}
 	return &NormalResponse{
@@ -133,4 +142,30 @@ func Respond(status int, body interface{}) *NormalResponse {
 		status: status,
 		header: make(http.Header),
 	}
+}
+
+// RedirectResponse represents a redirect response.
+type RedirectResponse struct {
+	location string
+}
+
+// WriteTo writes to a response.
+func (r *RedirectResponse) WriteTo(ctx *models.ReqContext) {
+	ctx.Redirect(r.location)
+}
+
+// Status gets the response's status.
+// Required to implement api.Response.
+func (*RedirectResponse) Status() int {
+	return http.StatusFound
+}
+
+// Body gets the response's body.
+// Required to implement api.Response.
+func (r *RedirectResponse) Body() []byte {
+	return nil
+}
+
+func Redirect(location string) *RedirectResponse {
+	return &RedirectResponse{location: location}
 }

@@ -1,44 +1,32 @@
----
-page_title: Plugin installation
-page_description: Plugin installation for Grafana
-page_keywords: grafana, plugins, documentation
----
++++
+title = "Install plugins"
+aliases = ["/docs/grafana/latest/plugins/installation/"]
+weight = 1
++++
 
-# Installing plugins
+# Install Grafana plugins
 
-The easiest way to install plugins is by using the CLI tool grafana-cli which is bundled with grafana. Before any modification take place after modifying plugins, grafana-server needs to be restarted.
+Grafana supports data source, panel, and app plugins. Having panels as plugins makes it easy to create and add any kind of panel, to show your data, or improve your favorite dashboards. Apps enable the bundling of data sources, panels, dashboards, and Grafana pages into a cohesive experience.
 
-### Grafana plugin directory
-On Linux systems the grafana-cli will assume that the grafana plugin directory is `/var/lib/grafana/plugins`. It's possible to override the directory which grafana-cli will operate on by specifying the --path flag. On Windows systems this parameter have to be specified for every call.
+1. In a web browser, navigate to the official [Grafana Plugins page](https://grafana.com/plugins) and find a plugin that you want to install.
+1. Click the plugin, and then click the **Installation** tab.
 
-### Grafana-cli commands
+## Install plugin on Grafana Cloud
 
-List available plugins
-```
-grafana-cli plugins list-remote
-```
+On the Installation tab, in the **For** field, click the name of the Grafana instance that you want to install the plugin on.
 
-Install a plugin type
-```
-grafana-cli plugins install <plugin-id>
-```
+Grafana Cloud handles the plugin installation automatically.
 
-List installed plugins
-```
-grafana-cli plugins ls
-```
+## Install plugin on local Grafana
 
-Update all installed plugins
-```
-grafana-cli plugins update-all
-```
+Follow the instructions on the Install tab. You can either install the plugin with a Grafana CLI command or by downloading and uncompress a .zip file into the Grafana plugins directory. We recommend using Grafana CLI in most instances. The .zip option is available if your Grafana server does not have access to the internet.
 
-Update one plugin
-```
-grafana-cli plugins update <plugin-id>
-```
+For more information about Grafana CLI plugin commands, refer to [Plugin commands]({{< relref "../administration/cli.md#plugins-commands" >}}).
 
-Remove one plugin
+### Install a packaged plugin
+
+After the user has downloaded the archive containing the plugin assets, they can install it by extracting the archive into their plugin directory.
+
 ```
-grafana-cli plugins remove <plugin-id>
+unzip my-plugin-0.2.0.zip -d YOUR_PLUGIN_DIR/my-plugin
 ```
