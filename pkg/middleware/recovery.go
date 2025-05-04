@@ -17,53 +17,19 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"runtime"
 
-	"gopkg.in/macaron.v1"
-
-	"github.com/go-macaron/inject"
-	"github.com/grafana/grafana/pkg/log"
+	"github.com/grafana/grafana/pkg/api/dtos"
+	"github.com/grafana/grafana/pkg/api/webassets"
+	"github.com/grafana/grafana/pkg/infra/log"
+	"github.com/grafana/grafana/pkg/services/contexthandler"
+	"github.com/grafana/grafana/pkg/services/licensing"
 	"github.com/grafana/grafana/pkg/setting"
-)
-
-const (
-	panicHtml = `<html>
-<head><title>PANIC: %s</title>
-<meta charset="utf-8" />
-<style type="text/css">
-html, body {
-	font-family: "Roboto", sans-serif;
-	color: #333333;
-	background-color: #ea5343;
-	margin: 0px;
-}
-h1 {
-	color: #d04526;
-	background-color: #ffffff;
-	padding: 20px;
-	border-bottom: 1px dashed #2b3848;
-}
-pre {
-	margin: 20px;
-	padding: 20px;
-	border: 2px solid #2b3848;
-	background-color: #ffffff;
-	white-space: pre-wrap;       /* css-3 */
-	white-space: -moz-pre-wrap;  /* Mozilla, since 1999 */
-	white-space: -pre-wrap;      /* Opera 4-6 */
-	white-space: -o-pre-wrap;    /* Opera 7 */
-	word-wrap: break-word;       /* Internet Explorer 5.5+ */
-}
-</style>
-</head><body>
-<h1>PANIC</h1>
-<pre style="font-weight: bold;">%s</pre>
-<pre>%s</pre>
-</body>
-</html>`
+	"github.com/grafana/grafana/pkg/web"
 )
 
 var (
@@ -73,7 +39,7 @@ var (
 	slash     = []byte("/")
 )
 
-// stack returns a nicely formated stack frame, skipping skip frames
+// stack returns a nicely formatted stack frame, skipping skip frames
 func stack(skip int) []byte {
 	buf := new(bytes.Buffer) // the returned data
 	// As we loop, we open files and read them. These variables record the currently
@@ -88,7 +54,10 @@ func stack(skip int) []byte {
 		// Print this much at least.  If we can't find the source, it won't show.
 		fmt.Fprintf(buf, "%s:%d (0x%x)\n", file, line, pc)
 		if file != lastFile {
-			data, err := ioutil.ReadFile(file)
+			// We can ignore the gosec G304 warning on this one because `file`
+			// comes from the runtime.Caller() function.
+			// nolint:gosec
+			data, err := os.ReadFile(file)
 			if err != nil {
 				continue
 			}
@@ -130,45 +99,85 @@ func function(pc uintptr) []byte {
 	if period := bytes.Index(name, dot); period >= 0 {
 		name = name[period+1:]
 	}
-	name = bytes.Replace(name, centerDot, dot, -1)
+	name = bytes.ReplaceAll(name, centerDot, dot)
 	return name
 }
 
 // Recovery returns a middleware that recovers from any panics and writes a 500 if there was one.
 // While Martini is in development mode, Recovery will also output the panic as HTML.
-func Recovery() macaron.Handler {
-	return func(c *macaron.Context) {
-		defer func() {
-			if err := recover(); err != nil {
-				stack := stack(3)
+func Recovery(cfg *setting.Cfg, license licensing.Licensing) web.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			c := web.FromContext(req.Context())
 
-				panicLogger := log.Root
-				// try to get request logger
-				if ctx, ok := c.Data["ctx"]; ok {
-					ctxTyped := ctx.(*Context)
-					panicLogger = ctxTyped.Logger
+			defer func() {
+				if r := recover(); r != nil {
+					var panicLogger log.Logger
+					panicLogger = log.New("recovery")
+					// try to get request logger
+					ctx := contexthandler.FromContext(c.Req.Context())
+					if ctx != nil {
+						panicLogger = ctx.Logger
+					}
+
+					if err, ok := r.(error); ok {
+						// http.ErrAbortHandler is suppressed by default in the http package
+						// and used as a signal for aborting requests. Suppresses stacktrace
+						// since it doesn't add any important information.
+						if errors.Is(err, http.ErrAbortHandler) {
+							panicLogger.Error("Request error", "error", err)
+							return
+						}
+					}
+
+					stack := stack(3)
+					panicLogger.Error("Request error", "error", r, "stack", string(stack))
+
+					// if response has already been written, skip.
+					if c.Resp.Written() {
+						return
+					}
+
+					assets, _ := webassets.GetWebAssets(req.Context(), cfg, license)
+					if assets == nil {
+						assets = &dtos.EntryPointAssets{JSFiles: []dtos.EntryPointAsset{}}
+					}
+
+					data := struct {
+						Title     string
+						AppTitle  string
+						AppSubUrl string
+						ThemeType string
+						ErrorMsg  string
+						Assets    *dtos.EntryPointAssets
+					}{"Server Error", "Grafana", cfg.AppSubURL, cfg.DefaultTheme, "", assets}
+
+					if setting.Env == setting.Dev {
+						if err, ok := r.(error); ok {
+							data.Title = err.Error()
+						}
+
+						data.ErrorMsg = string(stack)
+					}
+
+					if ctx != nil && ctx.IsApiRequest() {
+						resp := make(map[string]any)
+						resp["message"] = fmt.Sprintf("Internal Server Error - %s", cfg.UserFacingDefaultError)
+
+						if data.ErrorMsg != "" {
+							resp["error"] = fmt.Sprintf("%v - %v", data.Title, data.ErrorMsg)
+						} else {
+							resp["error"] = data.Title
+						}
+
+						ctx.JSON(500, resp)
+					} else {
+						ctx.HTML(500, cfg.ErrTemplateName, data)
+					}
 				}
+			}()
 
-				panicLogger.Error("Request error", "error", err, "stack", string(stack))
-
-				// Lookup the current responsewriter
-				val := c.GetVal(inject.InterfaceOf((*http.ResponseWriter)(nil)))
-				res := val.Interface().(http.ResponseWriter)
-
-				// respond with panic message while in development mode
-				var body []byte
-				if setting.Env == setting.DEV {
-					res.Header().Set("Content-Type", "text/html")
-					body = []byte(fmt.Sprintf(panicHtml, err, err, stack))
-				}
-
-				res.WriteHeader(http.StatusInternalServerError)
-				if nil != body {
-					res.Write(body)
-				}
-			}
-		}()
-
-		c.Next()
+			next.ServeHTTP(w, req)
+		})
 	}
 }

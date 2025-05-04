@@ -8,28 +8,21 @@
 }
 
 .pluginlist-link {
-  display: block;
-  margin: 5px;
-  padding: 7px;
-  background-color: $tight-form-bg;
-
-  &:hover {
-    background-color: $tight-form-func-bg;
-  }
+  @include list-item();
 }
 
 .pluginlist-icon {
   vertical-align: sub;
   font-size: $font-size-h1;
-  margin-right: $spacer / 2;
+  margin-right: calc($spacer / 2);
 }
 
 .pluginlist-image {
-  width: 20px;
+  width: 17px;
 }
 
 .pluginlist-title {
-  margin-right: $spacer / 3;
+  margin-right: calc($spacer / 3);
 }
 
 .pluginlist-version {
@@ -43,14 +36,14 @@
 }
 
 .pluginlist-message--update {
-   &:hover {
+  &:hover {
     border-bottom: 1px solid $text-color;
   }
 }
 
-.pluginlist-message--enable{
+.pluginlist-message--enable {
   color: $external-link-color;
-   &:hover {
+  &:hover {
     border-bottom: 1px solid $external-link-color;
   }
 }
@@ -60,16 +53,5 @@
 }
 
 .pluginlist-emphasis {
-  font-weight: 600;
-}
-
-.pluginlist-none-installed {
-  color: $text-color-weak;
-  font-size: $font-size-sm;
-}
-
-.pluginlist-inline-logo {
-  vertical-align: sub;
-  margin-right: $spacer / 3;
-  width: 16px;
+  font-weight: $font-weight-semi-bold;
 }

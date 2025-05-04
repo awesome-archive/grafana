@@ -1,18 +1,25 @@
 .page-dashboard .footer {
-	display: none;
+  display: none;
 }
 
 .footer {
   color: $footer-link-color;
-  padding: 5rem 0 1rem 0;
-  font-size: $font-size-xs;
-  width: 98%;  /* was causing horiz scrollbars - need to examine */
+  padding: $space-md 0 $space-md 0;
+  font-size: $font-size-sm;
+  position: relative;
+  width: 98%; /* was causing horiz scrollbars - need to examine */
 
   a {
     color: $footer-link-color;
 
     &:hover {
       color: $footer-link-hover;
+      text-decoration: underline;
+    }
+
+    i {
+      display: inline-block;
+      padding-right: $space-xxs;
     }
   }
 
@@ -22,10 +29,10 @@
 
   li {
     display: inline-block;
-    padding-right: 2px;
+
     &::after {
       content: ' | ';
-      padding-left: 2px;
+      padding: 0 $space-sm;
     }
   }
 
@@ -33,6 +40,30 @@
     &::after {
       padding-left: 0;
       content: '';
+    }
+  }
+}
+
+.login-page {
+  .footer {
+    display: block;
+    padding: $space-md 0 $space-md 0;
+    color: $text-color;
+
+    a {
+      color: $text-color;
+
+      &:hover {
+        color: $text-color-strong;
+      }
+    }
+  }
+}
+
+@include media-breakpoint-down(md) {
+  .login-page {
+    .footer {
+      display: none;
     }
   }
 }

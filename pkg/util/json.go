@@ -1,3 +1,4 @@
 package util
 
-type DynMap map[string]interface{}
+// DynMap defines a dynamic map interface.
+type DynMap map[string]any

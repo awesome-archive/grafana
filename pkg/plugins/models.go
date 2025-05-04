@@ -1,149 +1,308 @@
 package plugins
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
-	m "github.com/grafana/grafana/pkg/models"
-	"github.com/grafana/grafana/pkg/setting"
+	"github.com/grafana/grafana/pkg/services/org"
+)
+
+const (
+	TypeDashboard = "dashboard"
 )
 
 var (
-	PluginTypeApp        = "app"
-	PluginTypeDatasource = "datasource"
-	PluginTypePanel      = "panel"
-	PluginTypeDashboard  = "dashboard"
+	ErrInstallCorePlugin   = errors.New("cannot install a Core plugin")
+	ErrUninstallCorePlugin = errors.New("cannot uninstall a Core plugin")
+	ErrPluginNotInstalled  = errors.New("plugin is not installed")
 )
 
-type PluginNotFoundError struct {
-	PluginId string
+type NotFoundError struct {
+	PluginID string
 }
 
-func (e PluginNotFoundError) Error() string {
-	return fmt.Sprintf("Plugin with id %s not found", e.PluginId)
+func (e NotFoundError) Error() string {
+	return fmt.Sprintf("plugin with ID '%s' not found", e.PluginID)
 }
 
-type PluginLoader interface {
-	Load(decoder *json.Decoder, pluginDir string) error
+type DuplicateError struct {
+	PluginID string
 }
 
-type PluginBase struct {
-	Type         string             `json:"type"`
-	Name         string             `json:"name"`
-	Id           string             `json:"id"`
-	Info         PluginInfo         `json:"info"`
-	Dependencies PluginDependencies `json:"dependencies"`
-	Includes     []*PluginInclude   `json:"includes"`
-	Module       string             `json:"module"`
-	BaseUrl      string             `json:"baseUrl"`
-
-	IncludedInAppId string `json:"-"`
-	PluginDir       string `json:"-"`
-	DefaultNavUrl   string `json:"-"`
-	IsCorePlugin    bool   `json:"-"`
-
-	GrafanaNetVersion   string `json:"-"`
-	GrafanaNetHasUpdate bool   `json:"-"`
-
-	// cache for readme file contents
-	Readme []byte `json:"-"`
+func (e DuplicateError) Error() string {
+	return fmt.Sprintf("plugin with ID '%s' already exists", e.PluginID)
 }
 
-func (pb *PluginBase) registerPlugin(pluginDir string) error {
-	if _, exists := Plugins[pb.Id]; exists {
-		return errors.New("Plugin with same id already exists")
+func (e DuplicateError) Is(err error) bool {
+	// nolint:errorlint
+	_, ok := err.(DuplicateError)
+	return ok
+}
+
+type SignatureError struct {
+	PluginID        string          `json:"pluginId"`
+	SignatureStatus SignatureStatus `json:"status"`
+}
+
+func (e SignatureError) Error() string {
+	switch e.SignatureStatus {
+	case SignatureStatusInvalid:
+		return fmt.Sprintf("plugin '%s' has an invalid signature", e.PluginID)
+	case SignatureStatusModified:
+		return fmt.Sprintf("plugin '%s' has an modified signature", e.PluginID)
+	case SignatureStatusUnsigned:
+		return fmt.Sprintf("plugin '%s' has no signature", e.PluginID)
+	case SignatureStatusInternal, SignatureStatusValid:
+		return ""
 	}
 
-	if !strings.HasPrefix(pluginDir, setting.StaticRootPath) {
-		plog.Info("Registering plugin", "name", pb.Name)
-	}
-
-	if len(pb.Dependencies.Plugins) == 0 {
-		pb.Dependencies.Plugins = []PluginDependencyItem{}
-	}
-
-	if pb.Dependencies.GrafanaVersion == "" {
-		pb.Dependencies.GrafanaVersion = "*"
-	}
-
-	for _, include := range pb.Includes {
-		if include.Role == "" {
-			include.Role = m.RoleType(m.ROLE_VIEWER)
-		}
-	}
-
-	pb.PluginDir = pluginDir
-	Plugins[pb.Id] = pb
-	return nil
+	return fmt.Sprintf("plugin '%s' has an unknown signature state", e.PluginID)
 }
 
-type PluginDependencies struct {
-	GrafanaVersion string                 `json:"grafanaVersion"`
-	Plugins        []PluginDependencyItem `json:"plugins"`
+func (e SignatureError) AsErrorCode() ErrorCode {
+	switch e.SignatureStatus {
+	case SignatureStatusInvalid:
+		return errorCodeSignatureInvalid
+	case SignatureStatusModified:
+		return errorCodeSignatureModified
+	case SignatureStatusUnsigned:
+		return errorCodeSignatureMissing
+	case SignatureStatusInternal, SignatureStatusValid:
+		return ""
+	}
+
+	return ""
 }
 
-type PluginInclude struct {
-	Name       string     `json:"name"`
-	Path       string     `json:"path"`
-	Type       string     `json:"type"`
-	Component  string     `json:"component"`
-	Role       m.RoleType `json:"role"`
-	AddToNav   bool       `json:"addToNav"`
-	DefaultNav bool       `json:"defaultNav"`
-	Slug       string     `json:"slug"`
-
-	Id string `json:"-"`
+type Dependencies struct {
+	GrafanaDependency string       `json:"grafanaDependency"`
+	GrafanaVersion    string       `json:"grafanaVersion"`
+	Plugins           []Dependency `json:"plugins"`
 }
 
-type PluginDependencyItem struct {
+type Includes struct {
+	Name       string       `json:"name"`
+	Path       string       `json:"path"`
+	Type       string       `json:"type"`
+	Component  string       `json:"component"`
+	Role       org.RoleType `json:"role"`
+	Action     string       `json:"action,omitempty"`
+	AddToNav   bool         `json:"addToNav"`
+	DefaultNav bool         `json:"defaultNav"`
+	Slug       string       `json:"slug"`
+	Icon       string       `json:"icon"`
+	UID        string       `json:"uid"`
+
+	ID string `json:"-"`
+}
+
+func (e Includes) DashboardURLPath() string {
+	if e.Type != "dashboard" || len(e.UID) == 0 {
+		return ""
+	}
+	return "/d/" + e.UID
+}
+
+func (e Includes) RequiresRBACAction() bool {
+	return e.Action != ""
+}
+
+type Dependency struct {
+	ID      string `json:"id"`
 	Type    string `json:"type"`
-	Id      string `json:"id"`
 	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 
-type PluginInfo struct {
-	Author      PluginInfoLink      `json:"author"`
-	Description string              `json:"description"`
-	Links       []PluginInfoLink    `json:"links"`
-	Logos       PluginLogos         `json:"logos"`
-	Screenshots []PluginScreenshots `json:"screenshots"`
-	Version     string              `json:"version"`
-	Updated     string              `json:"updated"`
+type BuildInfo struct {
+	Time   int64  `json:"time,omitempty"`
+	Repo   string `json:"repo,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	Hash   string `json:"hash,omitempty"`
 }
 
-type PluginInfoLink struct {
+type Info struct {
+	Author      InfoLink      `json:"author"`
+	Description string        `json:"description"`
+	Links       []InfoLink    `json:"links"`
+	Logos       Logos         `json:"logos"`
+	Build       BuildInfo     `json:"build"`
+	Screenshots []Screenshots `json:"screenshots"`
+	Version     string        `json:"version"`
+	Updated     string        `json:"updated"`
+}
+
+type InfoLink struct {
 	Name string `json:"name"`
-	Url  string `json:"url"`
+	URL  string `json:"url"`
 }
 
-type PluginLogos struct {
+type Logos struct {
 	Small string `json:"small"`
 	Large string `json:"large"`
 }
 
-type PluginScreenshots struct {
-	Path string `json:"path"`
+type Screenshots struct {
 	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
-type PluginStaticRoute struct {
+type StaticRoute struct {
+	PluginID  string
 	Directory string
-	PluginId  string
 }
 
-type EnabledPlugins struct {
-	Panels      []*PanelPlugin
-	DataSources map[string]*DataSourcePlugin
-	Apps        []*AppPlugin
+type SignatureStatus string
+
+func (ss SignatureStatus) IsValid() bool {
+	return ss == SignatureStatusValid
 }
 
-func NewEnabledPlugins() EnabledPlugins {
-	return EnabledPlugins{
-		Panels:      make([]*PanelPlugin, 0),
-		DataSources: make(map[string]*DataSourcePlugin),
-		Apps:        make([]*AppPlugin, 0),
+func (ss SignatureStatus) IsInternal() bool {
+	return ss == SignatureStatusInternal
+}
+
+const (
+	SignatureStatusInternal SignatureStatus = "internal" // core plugin, no signature
+	SignatureStatusValid    SignatureStatus = "valid"    // signed and accurate MANIFEST
+	SignatureStatusInvalid  SignatureStatus = "invalid"  // invalid signature
+	SignatureStatusModified SignatureStatus = "modified" // valid signature, but content mismatch
+	SignatureStatusUnsigned SignatureStatus = "unsigned" // no MANIFEST file
+)
+
+type ReleaseState string
+
+const (
+	ReleaseStateAlpha ReleaseState = "alpha"
+)
+
+type SignatureType string
+
+const (
+	SignatureTypeGrafana     SignatureType = "grafana"
+	SignatureTypeCommercial  SignatureType = "commercial"
+	SignatureTypeCommunity   SignatureType = "community"
+	SignatureTypePrivate     SignatureType = "private"
+	SignatureTypePrivateGlob SignatureType = "private-glob"
+)
+
+func (s SignatureType) IsValid() bool {
+	switch s {
+	case SignatureTypeGrafana, SignatureTypeCommercial, SignatureTypeCommunity, SignatureTypePrivate,
+		SignatureTypePrivateGlob:
+		return true
 	}
+	return false
+}
+
+type Signature struct {
+	Status     SignatureStatus
+	Type       SignatureType
+	SigningOrg string
+}
+
+type PluginMetaDTO struct {
+	JSONData
+
+	Signature SignatureStatus `json:"signature"`
+
+	Module  string `json:"module"`
+	BaseURL string `json:"baseUrl"`
+
+	Angular AngularMeta `json:"angular"`
+}
+
+type DataSourceDTO struct {
+	ID         int64          `json:"id,omitempty"`
+	UID        string         `json:"uid,omitempty"`
+	Type       string         `json:"type"`
+	Name       string         `json:"name"`
+	PluginMeta *PluginMetaDTO `json:"meta"`
+	URL        string         `json:"url,omitempty"`
+	IsDefault  bool           `json:"isDefault"`
+	Access     string         `json:"access,omitempty"`
+	Preload    bool           `json:"preload"`
+	Module     string         `json:"module,omitempty"`
+	JSONData   map[string]any `json:"jsonData"`
+	ReadOnly   bool           `json:"readOnly"`
+
+	BasicAuth       string `json:"basicAuth,omitempty"`
+	WithCredentials bool   `json:"withCredentials,omitempty"`
+
+	// This is populated by an Enterprise hook
+	CachingConfig QueryCachingConfig `json:"cachingConfig,omitempty"`
+
+	// InfluxDB
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+
+	// InfluxDB + Elasticsearch
+	Database string `json:"database,omitempty"`
+
+	// Prometheus
+	DirectURL string `json:"directUrl,omitempty"`
+}
+
+type PanelDTO struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	AliasIDs      []string `json:"aliasIds,omitempty"`
+	Info          Info     `json:"info"`
+	HideFromList  bool     `json:"hideFromList"`
+	Sort          int      `json:"sort"`
+	SkipDataQuery bool     `json:"skipDataQuery"`
+	ReleaseState  string   `json:"state"`
+	BaseURL       string   `json:"baseUrl"`
+	Signature     string   `json:"signature"`
+	Module        string   `json:"module"`
+
+	Angular AngularMeta `json:"angular"`
+}
+
+type AppDTO struct {
+	ID      string `json:"id"`
+	Path    string `json:"path"`
+	Version string `json:"version"`
+	Preload bool   `json:"preload"`
+
+	Angular AngularMeta `json:"angular"`
+}
+
+const (
+	errorCodeSignatureMissing  ErrorCode = "signatureMissing"
+	errorCodeSignatureModified ErrorCode = "signatureModified"
+	errorCodeSignatureInvalid  ErrorCode = "signatureInvalid"
+)
+
+type ErrorCode string
+
+type Error struct {
+	ErrorCode `json:"errorCode"`
+	PluginID  string `json:"pluginId,omitempty"`
+}
+
+// Access-Control related definitions
+
+// RoleRegistration stores a role and its assignments to basic roles
+// (Viewer, Editor, Admin, Grafana Admin)
+type RoleRegistration struct {
+	Role   Role     `json:"role"`
+	Grants []string `json:"grants"`
+}
+
+// Role is the model for Role in RBAC.
+type Role struct {
+	Name        string       `json:"name"`
+	Description string       `json:"description"`
+	Permissions []Permission `json:"permissions"`
+}
+
+type Permission struct {
+	Action string `json:"action"`
+	Scope  string `json:"scope"`
+}
+
+type QueryCachingConfig struct {
+	Enabled bool  `json:"enabled"`
+	TTLMS   int64 `json:"TTLMs"`
 }

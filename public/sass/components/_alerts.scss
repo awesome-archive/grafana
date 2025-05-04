@@ -2,67 +2,87 @@
 // Alerts
 // --------------------------------------------------
 
-
 // Base styles
 // -------------------------
 
 .alert {
-  padding: 8px 35px 13px 14px;
-  margin-bottom: $line-height-base;
-  text-shadow: 0 1px 0 rgba(255,255,255,.5);
-  background-color: $state-warning-bg;
+  padding: 15px 20px;
+  margin-bottom: $space-xs;
+  border-left: 3px solid $alert-error-bg;
+  background: $layer2;
   position: relative;
-  color: $white;
-  text-shadow: 0 1px 0 rgba(0,0,0,.5);
-  border-radius: 2px;
+  border-radius: $border-radius;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
 }
 
 // Alternate styles
 // -------------------------
 
 .alert-success {
-  background-color: $successBackground;
+  border-color: $alert-success-bg;
 }
 
 .alert-danger,
 .alert-error {
-  background-color: $errorBackground;
-}
-.alert-info {
-  background-color: $infoBackground;
-}
-.alert-warning {
-  background-color: $state-warning-bg;
+  border-color: $alert-error-bg;
 }
 
-.page-alert-list {
-  z-index: 8000;
-  min-width: 300px;
-  max-width: 300px;
-  position: fixed;
-  right: 20px;
-  top: 56px;
+.alert-info {
+  border-color: $alert-info-bg;
+}
+
+.alert-warning {
+  border-color: $alert-warning-bg;
 }
 
 .alert-close {
-  position: absolute;
-  top: -4px;
-  right: -2px;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  background: $white;
-  border-radius: 50%;
+  padding: 0 0 0 $space-md;
   border: none;
-  font-size: 1.1rem;
-  color: $dark-4;
+  background: none;
+  display: flex;
+  align-items: center;
+
   .fa {
-    position: relative;
-    top: -2px;
+    align-self: flex-end;
+    font-size: 21px;
+    color: rgba(255, 255, 255, 0.75);
   }
 }
 
 .alert-title {
   font-weight: $font-weight-semi-bold;
-  padding-bottom: 2px;
+}
+
+.alert-icon {
+  padding: 0 $space-md 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 35px;
+
+  .fa {
+    font-size: 21px;
+  }
+}
+
+.alert-body {
+  overflow-wrap: break-word;
+  word-break: break-word;
+  flex-grow: 1;
+}
+
+.alert-icon-on-top {
+  align-items: flex-start;
+}
+
+@include media-breakpoint-down(sm) {
+  .page-alert-list {
+    min-width: 0;
+    top: 30px;
+    width: calc(100% - 20px);
+    max-height: calc(100% - 60px);
+    overflow-y: auto;
+  }
 }

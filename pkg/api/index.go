@@ -1,192 +1,262 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/grafana/grafana/pkg/api/dtos"
-	"github.com/grafana/grafana/pkg/bus"
+	"github.com/grafana/grafana/pkg/api/webassets"
 	"github.com/grafana/grafana/pkg/middleware"
-	m "github.com/grafana/grafana/pkg/models"
-	"github.com/grafana/grafana/pkg/plugins"
+	ac "github.com/grafana/grafana/pkg/services/accesscontrol"
+	"github.com/grafana/grafana/pkg/services/auth/identity"
+	contextmodel "github.com/grafana/grafana/pkg/services/contexthandler/model"
+	"github.com/grafana/grafana/pkg/services/dashboards"
+	"github.com/grafana/grafana/pkg/services/featuremgmt"
+	"github.com/grafana/grafana/pkg/services/login"
+	"github.com/grafana/grafana/pkg/services/org"
+	pref "github.com/grafana/grafana/pkg/services/preference"
+	"github.com/grafana/grafana/pkg/services/user"
 	"github.com/grafana/grafana/pkg/setting"
 )
 
-func setIndexViewData(c *middleware.Context) (*dtos.IndexViewData, error) {
-	settings, err := getFrontendSettingsMap(c)
+func (hs *HTTPServer) setIndexViewData(c *contextmodel.ReqContext) (*dtos.IndexViewData, error) {
+	settings, err := hs.getFrontendSettings(c)
 	if err != nil {
 		return nil, err
 	}
 
-	prefsQuery := m.GetPreferencesWithDefaultsQuery{OrgId: c.OrgId, UserId: c.UserId}
-	if err := bus.Dispatch(&prefsQuery); err != nil {
+	userID, _ := identity.UserIdentifier(c.SignedInUser.GetNamespacedID())
+
+	prefsQuery := pref.GetPreferenceWithDefaultsQuery{UserID: userID, OrgID: c.SignedInUser.GetOrgID(), Teams: c.Teams}
+	prefs, err := hs.preferenceService.GetWithDefaults(c.Req.Context(), &prefsQuery)
+	if err != nil {
 		return nil, err
 	}
-	prefs := prefsQuery.Result
 
-	// Read locale from acccept-language
-	acceptLang := c.Req.Header.Get("Accept-Language")
+	if hs.Features.IsEnabled(c.Req.Context(), featuremgmt.FlagIndividualCookiePreferences) {
+		if !prefs.Cookies("analytics") {
+			settings.GoogleAnalytics4Id = ""
+			settings.GoogleAnalyticsId = ""
+		}
+	}
+
+	// Locale is used for some number and date/time formatting, whereas language is used just for
+	// translating words in the interface
+	acceptLangHeader := c.Req.Header.Get("Accept-Language")
 	locale := "en-US"
+	language := "" // frontend will set the default language
 
-	if len(acceptLang) > 0 {
-		parts := strings.Split(acceptLang, ",")
+	if prefs.JSONData.Language != "" {
+		language = prefs.JSONData.Language
+	}
+
+	if len(acceptLangHeader) > 0 {
+		parts := strings.Split(acceptLangHeader, ",")
 		locale = parts[0]
 	}
 
-	var data = dtos.IndexViewData{
-		User: &dtos.CurrentUser{
-			Id:             c.UserId,
-			IsSignedIn:     c.IsSignedIn,
-			Login:          c.Login,
-			Email:          c.Email,
-			Name:           c.Name,
-			OrgId:          c.OrgId,
-			OrgName:        c.OrgName,
-			OrgRole:        c.OrgRole,
-			GravatarUrl:    dtos.GetGravatarUrl(c.Email),
-			IsGrafanaAdmin: c.IsGrafanaAdmin,
-			LightTheme:     prefs.Theme == "light",
-			Timezone:       prefs.Timezone,
-			Locale:         locale,
-		},
-		Settings:                settings,
-		AppUrl:                  setting.AppUrl,
-		AppSubUrl:               setting.AppSubUrl,
-		GoogleAnalyticsId:       setting.GoogleAnalyticsId,
-		GoogleTagManagerId:      setting.GoogleTagManagerId,
-		BuildVersion:            setting.BuildVersion,
-		BuildCommit:             setting.BuildCommit,
-		NewGrafanaVersion:       plugins.GrafanaLatestVersion,
-		NewGrafanaVersionExists: plugins.GrafanaHasUpdate,
+	appURL := setting.AppUrl
+	appSubURL := hs.Cfg.AppSubURL
+
+	// special case when doing localhost call from image renderer
+	if c.IsRenderCall && !hs.Cfg.ServeFromSubPath {
+		appURL = fmt.Sprintf("%s://localhost:%s", hs.Cfg.Protocol, hs.Cfg.HTTPPort)
+		appSubURL = ""
+		settings.AppSubUrl = ""
 	}
 
+	navTree, err := hs.navTreeService.GetNavTree(c, prefs)
+	if err != nil {
+		return nil, err
+	}
+
+	weekStart := ""
+	if prefs.WeekStart != nil {
+		weekStart = *prefs.WeekStart
+	}
+
+	theme := hs.getThemeForIndexData(prefs.Theme, c.Query("theme"))
+	assets, err := webassets.GetWebAssets(c.Req.Context(), hs.Cfg, hs.License)
+	if err != nil {
+		return nil, err
+	}
+
+	userOrgCount := 1
+	userOrgs, err := hs.orgService.GetUserOrgList(c.Req.Context(), &org.GetUserOrgListQuery{UserID: userID})
+	if err != nil {
+		hs.log.Error("Failed to count user orgs", "error", err)
+	}
+
+	if len(userOrgs) > 0 {
+		userOrgCount = len(userOrgs)
+	}
+
+	hasAccess := ac.HasAccess(hs.AccessControl, c)
+	hasEditPerm := hasAccess(ac.EvalAny(ac.EvalPermission(dashboards.ActionDashboardsCreate), ac.EvalPermission(dashboards.ActionFoldersCreate)))
+
+	data := dtos.IndexViewData{
+		User: &dtos.CurrentUser{
+			Id:                         userID,
+			IsSignedIn:                 c.IsSignedIn,
+			Login:                      c.Login,
+			Email:                      c.SignedInUser.GetEmail(),
+			Name:                       c.Name,
+			OrgId:                      c.SignedInUser.GetOrgID(),
+			OrgName:                    c.OrgName,
+			OrgRole:                    c.SignedInUser.GetOrgRole(),
+			OrgCount:                   userOrgCount,
+			GravatarUrl:                dtos.GetGravatarUrl(c.SignedInUser.GetEmail()),
+			IsGrafanaAdmin:             c.IsGrafanaAdmin,
+			Theme:                      theme.ID,
+			LightTheme:                 theme.Type == "light",
+			Timezone:                   prefs.Timezone,
+			WeekStart:                  weekStart,
+			Locale:                     locale,
+			Language:                   language,
+			HelpFlags1:                 c.HelpFlags1,
+			HasEditPermissionInFolders: hasEditPerm,
+			Analytics:                  hs.buildUserAnalyticsSettings(c),
+			AuthenticatedBy:            c.SignedInUser.AuthenticatedBy,
+		},
+		Settings:                            settings,
+		ThemeType:                           theme.Type,
+		AppUrl:                              appURL,
+		AppSubUrl:                           appSubURL,
+		NewsFeedEnabled:                     setting.NewsFeedEnabled,
+		GoogleAnalyticsId:                   settings.GoogleAnalyticsId,
+		GoogleAnalytics4Id:                  settings.GoogleAnalytics4Id,
+		GoogleAnalytics4SendManualPageViews: hs.Cfg.GoogleAnalytics4SendManualPageViews,
+		GoogleTagManagerId:                  hs.Cfg.GoogleTagManagerID,
+		BuildVersion:                        setting.BuildVersion,
+		BuildCommit:                         setting.BuildCommit,
+		NewGrafanaVersion:                   hs.grafanaUpdateChecker.LatestVersion(),
+		NewGrafanaVersionExists:             hs.grafanaUpdateChecker.UpdateAvailable(),
+		AppName:                             setting.ApplicationName,
+		AppNameBodyClass:                    "app-grafana",
+		FavIcon:                             "public/img/fav32.png",
+		AppleTouchIcon:                      "public/img/apple-touch-icon.png",
+		AppTitle:                            "Grafana",
+		NavTree:                             navTree,
+		Nonce:                               c.RequestNonce,
+		LoadingLogo:                         "public/img/grafana_icon.svg",
+		IsDevelopmentEnv:                    hs.Cfg.Env == setting.Dev,
+		Assets:                              assets,
+	}
+
+	if hs.Cfg.CSPEnabled {
+		data.CSPEnabled = true
+		data.CSPContent = middleware.ReplacePolicyVariables(hs.Cfg.CSPTemplate, appURL, c.RequestNonce)
+	}
+
+	userPermissions, err := hs.accesscontrolService.GetUserPermissions(c.Req.Context(), c.SignedInUser, ac.Options{ReloadCache: false})
+	if err != nil {
+		return nil, err
+	}
+
+	data.User.Permissions = ac.BuildPermissionsMap(userPermissions)
+
 	if setting.DisableGravatar {
-		data.User.GravatarUrl = setting.AppSubUrl + "/public/img/transparent.png"
+		data.User.GravatarUrl = hs.Cfg.AppSubURL + "/public/img/user_profile.png"
 	}
 
 	if len(data.User.Name) == 0 {
 		data.User.Name = data.User.Login
 	}
 
-	themeUrlParam := c.Query("theme")
-	if themeUrlParam == "light" {
-		data.User.LightTheme = true
-	}
+	hs.HooksService.RunIndexDataHooks(&data, c)
 
-	dashboardChildNavs := []*dtos.NavLink{
-		{Text: "Home", Url: setting.AppSubUrl + "/"},
-		{Text: "Playlists", Url: setting.AppSubUrl + "/playlists"},
-		{Text: "Snapshots", Url: setting.AppSubUrl + "/dashboard/snapshots"},
-	}
-
-	if c.OrgRole == m.ROLE_ADMIN || c.OrgRole == m.ROLE_EDITOR {
-		dashboardChildNavs = append(dashboardChildNavs, &dtos.NavLink{Divider: true})
-		dashboardChildNavs = append(dashboardChildNavs, &dtos.NavLink{Text: "New", Icon: "fa fa-plus", Url: setting.AppSubUrl + "/dashboard/new"})
-		dashboardChildNavs = append(dashboardChildNavs, &dtos.NavLink{Text: "Import", Icon: "fa fa-download", Url: setting.AppSubUrl + "/dashboard/new/?editview=import"})
-	}
-
-	data.MainNavLinks = append(data.MainNavLinks, &dtos.NavLink{
-		Text:     "Dashboards",
-		Icon:     "icon-gf icon-gf-dashboard",
-		Url:      setting.AppSubUrl + "/",
-		Children: dashboardChildNavs,
-	})
-
-	if c.OrgRole == m.ROLE_ADMIN {
-		data.MainNavLinks = append(data.MainNavLinks, &dtos.NavLink{
-			Text: "Data Sources",
-			Icon: "icon-gf icon-gf-datasources",
-			Url:  setting.AppSubUrl + "/datasources",
-		})
-
-		data.MainNavLinks = append(data.MainNavLinks, &dtos.NavLink{
-			Text: "Plugins",
-			Icon: "icon-gf icon-gf-apps",
-			Url:  setting.AppSubUrl + "/plugins",
-		})
-	}
-
-	enabledPlugins, err := plugins.GetEnabledPlugins(c.OrgId)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, plugin := range enabledPlugins.Apps {
-		if plugin.Pinned {
-			appLink := &dtos.NavLink{
-				Text: plugin.Name,
-				Url:  plugin.DefaultNavUrl,
-				Img:  plugin.Info.Logos.Small,
-			}
-
-			for _, include := range plugin.Includes {
-				if !c.HasUserRole(include.Role) {
-					continue
-				}
-
-				if include.Type == "page" && include.AddToNav {
-					link := &dtos.NavLink{
-						Url:  setting.AppSubUrl + "/plugins/" + plugin.Id + "/page/" + include.Slug,
-						Text: include.Name,
-					}
-					appLink.Children = append(appLink.Children, link)
-				}
-
-				if include.Type == "dashboard" && include.AddToNav {
-					link := &dtos.NavLink{
-						Url:  setting.AppSubUrl + "/dashboard/db/" + include.Slug,
-						Text: include.Name,
-					}
-					appLink.Children = append(appLink.Children, link)
-				}
-			}
-
-			if c.OrgRole == m.ROLE_ADMIN {
-				appLink.Children = append(appLink.Children, &dtos.NavLink{Divider: true})
-				appLink.Children = append(appLink.Children, &dtos.NavLink{Text: "Plugin Config", Icon: "fa fa-cog", Url: setting.AppSubUrl + "/plugins/" + plugin.Id + "/edit"})
-			}
-
-			if len(appLink.Children) > 0 {
-				data.MainNavLinks = append(data.MainNavLinks, appLink)
-			}
-		}
-	}
-
-	if c.IsGrafanaAdmin {
-		data.MainNavLinks = append(data.MainNavLinks, &dtos.NavLink{
-			Text: "Admin",
-			Icon: "fa fa-fw fa-cogs",
-			Url:  setting.AppSubUrl + "/admin",
-			Children: []*dtos.NavLink{
-				{Text: "Global Users", Url: setting.AppSubUrl + "/admin/users"},
-				{Text: "Global Orgs", Url: setting.AppSubUrl + "/admin/orgs"},
-				{Text: "Server Settings", Url: setting.AppSubUrl + "/admin/settings"},
-				{Text: "Server Stats", Url: setting.AppSubUrl + "/admin/stats"},
-			},
-		})
-	}
+	data.NavTree.ApplyAdminIA()
+	data.NavTree.Sort()
 
 	return &data, nil
 }
 
-func Index(c *middleware.Context) {
-	if data, err := setIndexViewData(c); err != nil {
-		c.Handle(500, "Failed to get settings", err)
-		return
-	} else {
-		c.HTML(200, "index", data)
+func (hs *HTTPServer) buildUserAnalyticsSettings(c *contextmodel.ReqContext) dtos.AnalyticsSettings {
+	namespace, id := c.SignedInUser.GetNamespacedID()
+
+	// Anonymous users do not have an email or auth info
+	if namespace != identity.NamespaceUser {
+		return dtos.AnalyticsSettings{Identifier: "@" + setting.AppUrl}
+	}
+
+	if !c.IsSignedIn {
+		return dtos.AnalyticsSettings{}
+	}
+
+	userID, err := identity.IntIdentifier(namespace, id)
+	if err != nil {
+		hs.log.Error("Failed to parse user ID", "error", err)
+		return dtos.AnalyticsSettings{Identifier: "@" + setting.AppUrl}
+	}
+
+	identifier := c.SignedInUser.GetEmail() + "@" + setting.AppUrl
+
+	authInfo, err := hs.authInfoService.GetAuthInfo(c.Req.Context(), &login.GetAuthInfoQuery{UserId: userID})
+	if err != nil && !errors.Is(err, user.ErrUserNotFound) {
+		hs.log.Error("Failed to get auth info for analytics", "error", err)
+	}
+
+	if authInfo != nil && authInfo.AuthModule == login.GrafanaComAuthModule {
+		identifier = authInfo.AuthId
+	}
+
+	return dtos.AnalyticsSettings{
+		Identifier:         identifier,
+		IntercomIdentifier: hashUserIdentifier(identifier, hs.Cfg.IntercomSecret),
 	}
 }
 
-func NotFoundHandler(c *middleware.Context) {
+func hashUserIdentifier(identifier string, secret string) string {
+	if secret == "" {
+		return ""
+	}
+
+	key := []byte(secret)
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(identifier))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (hs *HTTPServer) Index(c *contextmodel.ReqContext) {
+	data, err := hs.setIndexViewData(c)
+	if err != nil {
+		c.Handle(hs.Cfg, 500, "Failed to get settings", err)
+		return
+	}
+	c.HTML(http.StatusOK, "index", data)
+}
+
+func (hs *HTTPServer) NotFoundHandler(c *contextmodel.ReqContext) {
 	if c.IsApiRequest() {
 		c.JsonApiErr(404, "Not found", nil)
 		return
 	}
 
-	if data, err := setIndexViewData(c); err != nil {
-		c.Handle(500, "Failed to get settings", err)
+	data, err := hs.setIndexViewData(c)
+	if err != nil {
+		c.Handle(hs.Cfg, 500, "Failed to get settings", err)
 		return
-	} else {
-		c.HTML(404, "index", data)
 	}
+
+	c.HTML(404, "index", data)
+}
+
+func (hs *HTTPServer) getThemeForIndexData(themePrefId string, themeURLParam string) *pref.ThemeDTO {
+	if themeURLParam != "" && pref.IsValidThemeID(themeURLParam) {
+		return pref.GetThemeByID(themeURLParam)
+	}
+
+	if pref.IsValidThemeID(themePrefId) {
+		theme := pref.GetThemeByID(themePrefId)
+		if !theme.IsExtra || hs.Features.IsEnabledGlobally(featuremgmt.FlagExtraThemes) {
+			return theme
+		}
+	}
+
+	return pref.GetThemeByID(hs.Cfg.DefaultTheme)
 }

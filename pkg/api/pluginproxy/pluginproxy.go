@@ -3,97 +3,205 @@ package pluginproxy
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
-	"fmt"
+	"io"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
-	"text/template"
 
-	"github.com/grafana/grafana/pkg/bus"
-	"github.com/grafana/grafana/pkg/log"
-	"github.com/grafana/grafana/pkg/middleware"
-	m "github.com/grafana/grafana/pkg/models"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/grafana/grafana/pkg/infra/tracing"
 	"github.com/grafana/grafana/pkg/plugins"
+	contextmodel "github.com/grafana/grafana/pkg/services/contexthandler/model"
+	"github.com/grafana/grafana/pkg/services/featuremgmt"
+	"github.com/grafana/grafana/pkg/services/pluginsintegration/pluginsettings"
+	"github.com/grafana/grafana/pkg/services/secrets"
+	"github.com/grafana/grafana/pkg/setting"
 	"github.com/grafana/grafana/pkg/util"
+	"github.com/grafana/grafana/pkg/util/proxyutil"
+	"github.com/grafana/grafana/pkg/web"
 )
 
-type templateData struct {
-	JsonData       map[string]interface{}
-	SecureJsonData map[string]string
+type PluginProxy struct {
+	ps             *pluginsettings.DTO
+	pluginRoutes   []*plugins.Route
+	ctx            *contextmodel.ReqContext
+	proxyPath      string
+	matchedRoute   *plugins.Route
+	cfg            *setting.Cfg
+	secretsService secrets.Service
+	tracer         tracing.Tracer
+	transport      *http.Transport
+	features       featuremgmt.FeatureToggles
 }
 
-func getHeaders(route *plugins.AppPluginRoute, orgId int64, appId string) (http.Header, error) {
-	result := http.Header{}
+// NewPluginProxy creates a plugin proxy.
+func NewPluginProxy(ps *pluginsettings.DTO, routes []*plugins.Route, ctx *contextmodel.ReqContext,
+	proxyPath string, cfg *setting.Cfg, secretsService secrets.Service, tracer tracing.Tracer,
+	transport *http.Transport, features featuremgmt.FeatureToggles) (*PluginProxy, error) {
+	return &PluginProxy{
+		ps:             ps,
+		pluginRoutes:   routes,
+		ctx:            ctx,
+		proxyPath:      proxyPath,
+		cfg:            cfg,
+		secretsService: secretsService,
+		tracer:         tracer,
+		transport:      transport,
+		features:       features,
+	}, nil
+}
 
-	query := m.GetPluginSettingByIdQuery{OrgId: orgId, PluginId: appId}
+func (proxy *PluginProxy) HandleRequest() {
+	// found route if there are any
+	for _, route := range proxy.pluginRoutes {
+		// method match
+		if route.Method != "" && route.Method != "*" && route.Method != proxy.ctx.Req.Method {
+			continue
+		}
 
-	if err := bus.Dispatch(&query); err != nil {
-		return nil, err
+		t := web.NewTree()
+		t.Add(route.Path, nil)
+		_, params, isMatch := t.Match(proxy.proxyPath)
+
+		if !isMatch {
+			continue
+		}
+
+		if route.ReqRole.IsValid() {
+			if !proxy.ctx.HasUserRole(route.ReqRole) {
+				proxy.ctx.JsonApiErr(http.StatusForbidden, "plugin proxy route access denied", nil)
+				return
+			}
+		}
+
+		if path, exists := params["*"]; exists {
+			proxy.proxyPath = path
+		} else {
+			proxy.proxyPath = ""
+		}
+
+		proxy.matchedRoute = route
+		break
+	}
+
+	if proxy.matchedRoute == nil {
+		proxy.ctx.JsonApiErr(http.StatusNotFound, "plugin route match not found", nil)
+		return
+	}
+
+	proxyErrorLogger := logger.New(
+		"userId", proxy.ctx.UserID,
+		"orgId", proxy.ctx.OrgID,
+		"uname", proxy.ctx.Login,
+		"path", proxy.ctx.Req.URL.Path,
+		"remote_addr", proxy.ctx.RemoteAddr(),
+		"referer", proxy.ctx.Req.Referer(),
+	)
+
+	reverseProxy := proxyutil.NewReverseProxy(
+		proxyErrorLogger,
+		proxy.director,
+		proxyutil.WithTransport(proxy.transport),
+	)
+
+	proxy.logRequest()
+	ctx, span := proxy.tracer.Start(proxy.ctx.Req.Context(), "plugin reverse proxy")
+	defer span.End()
+
+	proxy.ctx.Req = proxy.ctx.Req.WithContext(ctx)
+
+	span.SetAttributes(
+		attribute.String("user", proxy.ctx.SignedInUser.Login),
+		attribute.Int64("org_id", proxy.ctx.SignedInUser.OrgID),
+	)
+
+	proxy.tracer.Inject(ctx, proxy.ctx.Req.Header, span)
+
+	reverseProxy.ServeHTTP(proxy.ctx.Resp, proxy.ctx.Req)
+}
+
+func (proxy PluginProxy) director(req *http.Request) {
+	secureJsonData, err := proxy.secretsService.DecryptJsonData(proxy.ctx.Req.Context(), proxy.ps.SecureJSONData)
+	if err != nil {
+		proxy.ctx.JsonApiErr(500, "Failed to decrypt plugin settings", err)
+		return
 	}
 
 	data := templateData{
-		JsonData:       query.Result.JsonData,
-		SecureJsonData: query.Result.SecureJsonData.Decrypt(),
+		JsonData:       proxy.ps.JSONData,
+		SecureJsonData: secureJsonData,
 	}
 
-	for _, header := range route.Headers {
-		var contentBuf bytes.Buffer
-		t, err := template.New("content").Parse(header.Content)
-		if err != nil {
-			return nil, errors.New(fmt.Sprintf("could not parse header content template for header %s.", header.Name))
-		}
+	interpolatedURL, err := interpolateString(proxy.matchedRoute.URL, data)
+	if err != nil {
+		proxy.ctx.JsonApiErr(500, "Could not interpolate plugin route url", err)
+		return
+	}
+	targetURL, err := url.Parse(interpolatedURL)
+	if err != nil {
+		proxy.ctx.JsonApiErr(500, "Could not parse url", err)
+		return
+	}
+	req.URL.Scheme = targetURL.Scheme
+	req.URL.Host = targetURL.Host
+	req.Host = targetURL.Host
+	req.URL.Path = util.JoinURLFragments(targetURL.Path, proxy.proxyPath)
 
-		err = t.Execute(&contentBuf, data)
-		if err != nil {
-			return nil, errors.New(fmt.Sprintf("failed to execute header content template for header %s.", header.Name))
-		}
+	// clear cookie headers
+	req.Header.Del("Cookie")
+	req.Header.Del("Set-Cookie")
 
-		log.Trace("Adding header to proxy request. %s: %s", header.Name, contentBuf.String())
-		result.Add(header.Name, contentBuf.String())
+	// Create a HTTP header with the context in it.
+	ctxJSON, err := json.Marshal(proxy.ctx.SignedInUser)
+	if err != nil {
+		proxy.ctx.JsonApiErr(500, "failed to marshal context to json.", err)
+		return
 	}
 
-	return result, nil
+	req.Header.Set("X-Grafana-Context", string(ctxJSON))
+
+	proxyutil.ApplyUserHeader(proxy.cfg.SendUserHeader, req, proxy.ctx.SignedInUser)
+
+	if proxy.features.IsEnabled(req.Context(), featuremgmt.FlagIdForwarding) {
+		proxyutil.ApplyForwardIDHeader(req, proxy.ctx.SignedInUser)
+	}
+
+	if err := addHeaders(&req.Header, proxy.matchedRoute, data); err != nil {
+		proxy.ctx.JsonApiErr(500, "Failed to render plugin headers", err)
+		return
+	}
+
+	if err := setBodyContent(req, proxy.matchedRoute, data); err != nil {
+		logger.FromContext(req.Context()).Error("Failed to set plugin route body content", "error", err)
+	}
 }
 
-func NewApiPluginProxy(ctx *middleware.Context, proxyPath string, route *plugins.AppPluginRoute, appId string) *httputil.ReverseProxy {
-	targetUrl, _ := url.Parse(route.Url)
-
-	director := func(req *http.Request) {
-
-		req.URL.Scheme = targetUrl.Scheme
-		req.URL.Host = targetUrl.Host
-		req.Host = targetUrl.Host
-
-		req.URL.Path = util.JoinUrlFragments(targetUrl.Path, proxyPath)
-
-		// clear cookie headers
-		req.Header.Del("Cookie")
-		req.Header.Del("Set-Cookie")
-
-		//Create a HTTP header with the context in it.
-		ctxJson, err := json.Marshal(ctx.SignedInUser)
-		if err != nil {
-			ctx.JsonApiErr(500, "failed to marshal context to json.", err)
-			return
-		}
-
-		req.Header.Add("X-Grafana-Context", string(ctxJson))
-
-		if len(route.Headers) > 0 {
-			headers, err := getHeaders(route, ctx.OrgId, appId)
-			if err != nil {
-				ctx.JsonApiErr(500, "Could not generate plugin route header", err)
-				return
-			}
-
-			for key, value := range headers {
-				log.Trace("setting key %v value %v", key, value[0])
-				req.Header.Set(key, value[0])
-			}
-		}
-
+func (proxy PluginProxy) logRequest() {
+	if !proxy.cfg.DataProxyLogging {
+		return
 	}
 
-	return &httputil.ReverseProxy{Director: director}
+	var body string
+	if proxy.ctx.Req.Body != nil {
+		buffer, err := io.ReadAll(proxy.ctx.Req.Body)
+		if err == nil {
+			proxy.ctx.Req.Body = io.NopCloser(bytes.NewBuffer(buffer))
+			body = string(buffer)
+		}
+	}
+
+	ctxLogger := logger.FromContext(proxy.ctx.Req.Context())
+	ctxLogger.Info("Proxying incoming request",
+		"userid", proxy.ctx.UserID,
+		"orgid", proxy.ctx.OrgID,
+		"username", proxy.ctx.Login,
+		"app", proxy.ps.PluginID,
+		"uri", proxy.ctx.Req.RequestURI,
+		"method", proxy.ctx.Req.Method,
+		"body", body)
+}
+
+type templateData struct {
+	JsonData       map[string]any
+	SecureJsonData map[string]string
 }

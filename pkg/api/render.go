@@ -1,47 +1,94 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 
-	"github.com/grafana/grafana/pkg/components/renderer"
-	"github.com/grafana/grafana/pkg/middleware"
-	"github.com/grafana/grafana/pkg/setting"
+	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/services/auth/identity"
+	contextmodel "github.com/grafana/grafana/pkg/services/contexthandler/model"
+	"github.com/grafana/grafana/pkg/services/rendering"
 	"github.com/grafana/grafana/pkg/util"
+	"github.com/grafana/grafana/pkg/web"
 )
 
-func RenderToPng(c *middleware.Context) {
-	queryReader := util.NewUrlQueryReader(c.Req.URL)
-	queryParams := fmt.Sprintf("?%s", c.Req.URL.RawQuery)
-	sessionId := c.Session.ID()
-
-	// Handle api calls authenticated without session
-	if sessionId == "" && c.ApiKeyId != 0 {
-		c.Session.Start(c)
-		c.Session.Set(middleware.SESS_KEY_APIKEY, c.ApiKeyId)
-		// release will make sure the new session is persisted before
-		// we spin up phantomjs
-		c.Session.Release()
-		// cleanup session after render is complete
-		defer func() { c.Session.Destory(c) }()
-	}
-
-	renderOpts := &renderer.RenderOpts{
-		Url:       c.Params("*") + queryParams,
-		Width:     queryReader.Get("width", "800"),
-		Height:    queryReader.Get("height", "400"),
-		SessionId: c.Session.ID(),
-		Timeout:   queryReader.Get("timeout", "30"),
-	}
-
-	renderOpts.Url = setting.ToAbsUrl(renderOpts.Url)
-	pngPath, err := renderer.RenderToPng(renderOpts)
-
+func (hs *HTTPServer) RenderToPng(c *contextmodel.ReqContext) {
+	queryReader, err := util.NewURLQueryReader(c.Req.URL)
 	if err != nil {
-		c.Handle(500, "Failed to render to png", err)
+		c.Handle(hs.Cfg, 400, "Render parameters error", err)
+		return
+	}
+
+	queryParams := fmt.Sprintf("?%s", c.Req.URL.RawQuery)
+
+	width, err := strconv.Atoi(queryReader.Get("width", "800"))
+	if err != nil {
+		c.Handle(hs.Cfg, 400, "Render parameters error", fmt.Errorf("cannot parse width as int: %s", err))
+		return
+	}
+
+	height, err := strconv.Atoi(queryReader.Get("height", "400"))
+	if err != nil {
+		c.Handle(hs.Cfg, 400, "Render parameters error", fmt.Errorf("cannot parse height as int: %s", err))
+		return
+	}
+
+	timeout, err := strconv.Atoi(queryReader.Get("timeout", "60"))
+	if err != nil {
+		c.Handle(hs.Cfg, 400, "Render parameters error", fmt.Errorf("cannot parse timeout as int: %s", err))
+		return
+	}
+
+	scale, err := strconv.ParseFloat(queryReader.Get("scale", "1"), 64)
+	if err != nil {
+		c.Handle(hs.Cfg, 400, "Render parameters error", fmt.Errorf("cannot parse scale as float: %s", err))
+		return
+	}
+
+	headers := http.Header{}
+	acceptLanguageHeader := c.Req.Header.Values("Accept-Language")
+	if len(acceptLanguageHeader) > 0 {
+		headers["Accept-Language"] = acceptLanguageHeader
+	}
+
+	userID, errID := identity.UserIdentifier(c.SignedInUser.GetNamespacedID())
+	if errID != nil {
+		hs.log.Error("Failed to parse user id", "err", errID)
+	}
+
+	result, err := hs.RenderService.Render(c.Req.Context(), rendering.Opts{
+		TimeoutOpts: rendering.TimeoutOpts{
+			Timeout: time.Duration(timeout) * time.Second,
+		},
+		AuthOpts: rendering.AuthOpts{
+			OrgID:   c.SignedInUser.GetOrgID(),
+			UserID:  userID,
+			OrgRole: c.SignedInUser.GetOrgRole(),
+		},
+		Width:             width,
+		Height:            height,
+		Path:              web.Params(c.Req)["*"] + queryParams,
+		Timezone:          queryReader.Get("tz", ""),
+		Encoding:          queryReader.Get("encoding", ""),
+		ConcurrentLimit:   hs.Cfg.RendererConcurrentRequestLimit,
+		DeviceScaleFactor: scale,
+		Headers:           headers,
+		Theme:             models.ThemeDark,
+	}, nil)
+	if err != nil {
+		if errors.Is(err, rendering.ErrTimeout) {
+			c.Handle(hs.Cfg, 500, err.Error(), err)
+			return
+		}
+
+		c.Handle(hs.Cfg, 500, "Rendering failed.", err)
 		return
 	}
 
 	c.Resp.Header().Set("Content-Type", "image/png")
-	http.ServeFile(c.Resp, c.Req.Request, pngPath)
+	c.Resp.Header().Set("Cache-Control", "private")
+	http.ServeFile(c.Resp, c.Req, result.FilePath)
 }

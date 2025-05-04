@@ -1,61 +1,87 @@
-# Building The Docs
+# Building the docs locally
 
-To build the docs locally, you need to have docker installed.  The
-docs are built using a custom [docker](https://www.docker.com/) image
-and the [mkdocs](http://www.mkdocs.org/) tool.
+When you contribute to documentation, it's a good practice to build the docs on your local machine to make sure your changes appear as you expect. This README explains the process for doing that.
 
-**Prepare the Docker Image**:
+To build a local version, you need to run a process in a Docker container.
+Grafana periodically updates the Docker image, [`docs-base`](https://hub.docker.com/r/grafana/docs-base), to update the styling of the Docs.
 
-Build the `grafana/docs-base:latest` image. Run these commands in the
-same directory this file is in. **Note** that you may require ``sudo``
-when running ``make docs-build`` depending on how your system's docker
-service is configured):
+## Requirements
+
+- Docker >= 2.1.0.3
+- Yarn >= 1.22.4
+
+## Build the doc site
+
+First, make sure the Docker daemon is running on your machine. Then, follow these steps:
+
+1. On the command line, first change to the docs folder: `cd docs`.
+1. Run `make docs`. This launches a preview of the website with the current grafana docs at `http://localhost:3002/docs/grafana/latest/` which will refresh automatically when changes are made to content in the `sources` directory.
+
+If you have the grafana/website repo checked out in the same directory as the grafana repo, then you can run `make docs-local-static` to use local assets (such as images).
+
+---
+
+## Content guidelines
+
+Generally, one can edit content in the `sources` directory.
+
+The following paths are built instead from a typescript file and are auto-generated. Please do not edit these files directly.
+Instead, navigate to the appropriate typescript source file and edit the content there, then follow the build instructions to generate the markdown files.
+
+### Transformations
+
+Auto-generated markdown location:
+
+- docs/sources/panels-visualizations/query-transform-data/transform-data/index.md
+
+Typescript location for editing and instructions:
+
+- scripts/docs/generate-transformations.ts - Includes all content not specific to a transformation.
+- public/app/features/transformers/docs/content.ts - Transformation-specific content.
+
+Only use [reference style links](https://grafana.com/docs/writers-toolkit/write/shortcodes/#docsreference) in the `content.ts` file or else link text will be visible in the UI.
+
+### [Contributing](/contribute/documentation/README.md)
+
+### Using `relref` for internal links
+
+Use the Hugo shortcode [relref](https://gohugo.io/content-management/cross-references/#use-ref-and-relref) any time you are linking to other internal docs pages.
+
+Syntax is:
 
 ```
-$ git clone https://github.com/grafana/docs-base
-$ cd docs-base
-$ make docs-build
+{{< relref "example.md" >}}
 ```
 
-**Build the Documentation**:
+You might need to add more context for the link (containing folders and so on, `folder/example.md`) if Hugo says the relref is ambiguous.
 
-Now that the docker image has been prepared we can build the
-docs. Switch your working directory back to the directory this file
-(README.md) is in and run (possibly with ``sudo``):
+### Managing redirects
 
-```
-$ make docs
-```
+When moving content around or removing pages it's important that users following old links are properly redirected to the new location. We do this using the [aliases](https://gohugo.io/content-management/urls/#aliases) feature in Hugo.
 
-This command will not return control of the shell to the user. Instead
-the command is now running a new docker container built from the image
-we created in the previous step.
+If you are moving a page, add an `aliases` entry in the front matter referencing the old location of the page which will redirect the old url to the new location.
 
-Open [localhost:8180](http://localhost:8180) to view the docs.
+If you are removing a page, add an `aliases` entry in the front matter of the most-applicable page referencing the location of the page being removed.
 
-**Note** that after running ``make docs`` you may notice a message
-like this in the console output
+If you are copying an existing page as the basis for a new one, be sure to remove any `aliases` entries in the front matter in your copy to avoid conflicting redirects.
 
-> Running at: http://0.0.0.0:8000/
+### Edit the side menu
 
-This is misleading. That is **not** the port the documentation is
-served from. You must browse to port **8180** to view the new
-documentation.
+The side menu is automatically build from the file structure. Use the [weight](https://gohugo.io/templates/lists/#by-weight) front matter parameter to order pages.
 
+To specify different menu text from the page title, use the front matter parameter `menuTitle`.
 
-# Adding a New Page
+### Add images
 
-Adding a new page requires updating the ``mkdocs.yml`` file which is
-located in this directory.
+Please see our help documentation on [Image, diagram, and screenshot guidelines](https://grafana.com/docs/writers-toolkit/writing-guide/image-guidelines/) for comprehensive information.
 
-For example, if you are adding documentation for a new HTTP API called
-``preferences`` you would:
+---
 
-1. Create the file ``docs/sources/http_api/preferences.md``
-1. Add a reference to it in ``docs/sources/http_api/overview.md``
-1. Update the list under the **pages** key in the ``docs/mkdocs.yml`` file with a reference to your new page:
+## Deploy changes to grafana.com
 
+When a PR is merged with changes in the `docs/sources` directory, those changes are automatically synced by a GitHub action (`.github/workflows/publish.yml`) to the grafana/website repo.
 
-```yaml
-- ['http_api/preferences.md', 'API', 'Preferences API']
-```
+- A PR that targets the `main` branch syncs to the `content/docs/grafana/next` directory in the `website` repository, and publishes to `https://grafana.com/docs/grafana/next/`.
+- A PR targeting the `latest/current` release branch syncs to the `content/docs/grafana/latest` directory in the `website` repository, and publishes to `https://grafana.com/docs/grafana/latest/`.
+
+Once the sync is complete, the website will automatically publish to production - no further action is needed.

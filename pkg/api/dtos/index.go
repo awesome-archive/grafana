@@ -1,29 +1,61 @@
 package dtos
 
+import (
+	"html/template"
+
+	"github.com/grafana/grafana/pkg/services/navtree"
+)
+
 type IndexViewData struct {
-	User                    *CurrentUser
-	Settings                map[string]interface{}
-	AppUrl                  string
-	AppSubUrl               string
-	GoogleAnalyticsId       string
-	GoogleTagManagerId      string
-	MainNavLinks            []*NavLink
-	BuildVersion            string
-	BuildCommit             string
-	NewGrafanaVersionExists bool
-	NewGrafanaVersion       string
+	User                                *CurrentUser
+	Settings                            *FrontendSettingsDTO
+	AppUrl                              string
+	AppSubUrl                           string
+	GoogleAnalyticsId                   string
+	GoogleAnalytics4Id                  string
+	GoogleAnalytics4SendManualPageViews bool
+	GoogleTagManagerId                  string
+	NavTree                             *navtree.NavTreeRoot
+	BuildVersion                        string
+	BuildCommit                         string
+	ThemeType                           string
+	NewGrafanaVersionExists             bool
+	NewGrafanaVersion                   string
+	AppName                             string
+	AppNameBodyClass                    string
+	FavIcon                             template.URL
+	AppleTouchIcon                      template.URL
+	AppTitle                            string
+	LoadingLogo                         template.URL
+	CSPContent                          string
+	CSPEnabled                          bool
+	IsDevelopmentEnv                    bool
+	// Nonce is a cryptographic identifier for use with Content Security Policy.
+	Nonce           string
+	NewsFeedEnabled bool
+	Assets          *EntryPointAssets // Includes CDN info
 }
 
-type PluginCss struct {
-	Light string `json:"light"`
-	Dark  string `json:"dark"`
+type EntryPointAssets struct {
+	ContentDeliveryURL string            `json:"cdn,omitempty"`
+	JSFiles            []EntryPointAsset `json:"jsFiles"`
+	Dark               string            `json:"dark"`
+	Light              string            `json:"light"`
 }
 
-type NavLink struct {
-	Text     string     `json:"text,omitempty"`
-	Icon     string     `json:"icon,omitempty"`
-	Img      string     `json:"img,omitempty"`
-	Url      string     `json:"url,omitempty"`
-	Divider  bool       `json:"divider,omitempty"`
-	Children []*NavLink `json:"children,omitempty"`
+type EntryPointAsset struct {
+	FilePath  string `json:"filePath"`
+	Integrity string `json:"integrity"`
+}
+
+func (a *EntryPointAssets) SetContentDeliveryURL(prefix string) {
+	if prefix == "" {
+		return
+	}
+	a.ContentDeliveryURL = prefix
+	a.Dark = prefix + a.Dark
+	a.Light = prefix + a.Light
+	for i, p := range a.JSFiles {
+		a.JSFiles[i].FilePath = prefix + p.FilePath
+	}
 }

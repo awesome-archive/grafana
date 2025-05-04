@@ -1,24 +1,13 @@
+import { DataSourcePlugin } from '@grafana/data';
+
+import ConfigEditor from './components/editor/config/ConfigEditor';
+import { QueryEditor } from './components/editor/query/QueryEditor';
+import { InfluxStartPage } from './components/editor/query/influxql/InfluxStartPage';
+import VariableQueryEditor from './components/editor/variable/VariableQueryEditor';
 import InfluxDatasource from './datasource';
-import {InfluxQueryCtrl} from './query_ctrl';
 
-class InfluxConfigCtrl {
-  static templateUrl = 'partials/config.html';
-}
-
-class InfluxQueryOptionsCtrl {
-  static templateUrl = 'partials/query.options.html';
-}
-
-class InfluxAnnotationsQueryCtrl {
-  static templateUrl = 'partials/annotations.editor.html';
-}
-
-export {
-  InfluxDatasource as Datasource,
-  InfluxQueryCtrl as QueryCtrl,
-  InfluxConfigCtrl as ConfigCtrl,
-  InfluxQueryOptionsCtrl as QueryOptionsCtrl,
-  InfluxAnnotationsQueryCtrl as AnnotationsQueryCtrl,
-};
-
-
+export const plugin = new DataSourcePlugin(InfluxDatasource)
+  .setConfigEditor(ConfigEditor)
+  .setQueryEditor(QueryEditor)
+  .setVariableQueryEditor(VariableQueryEditor)
+  .setQueryEditorHelp(InfluxStartPage);

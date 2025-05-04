@@ -1,95 +1,97 @@
 package api
 
 import (
-	"encoding/json"
-	"math/rand"
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
-	"strconv"
+
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 
 	"github.com/grafana/grafana/pkg/api/dtos"
-	"github.com/grafana/grafana/pkg/metrics"
-	"github.com/grafana/grafana/pkg/middleware"
-	"github.com/grafana/grafana/pkg/util"
+	"github.com/grafana/grafana/pkg/api/response"
+	"github.com/grafana/grafana/pkg/middleware/requestmeta"
+	contextmodel "github.com/grafana/grafana/pkg/services/contexthandler/model"
+	"github.com/grafana/grafana/pkg/services/datasources"
+	"github.com/grafana/grafana/pkg/services/featuremgmt"
+	"github.com/grafana/grafana/pkg/web"
 )
 
-func GetTestMetrics(c *middleware.Context) Response {
-	from := c.QueryInt64("from")
-	to := c.QueryInt64("to")
-	maxDataPoints := c.QueryInt64("maxDataPoints")
-	stepInSeconds := (to - from) / maxDataPoints
-
-	result := dtos.MetricQueryResultDto{}
-	result.Data = make([]dtos.MetricQueryResultDataDto, 1)
-
-	for seriesIndex := range result.Data {
-		points := make([][2]float64, maxDataPoints)
-		walker := rand.Float64() * 100
-		time := from
-
-		for i := range points {
-			points[i][0] = walker
-			points[i][1] = float64(time)
-			walker += rand.Float64() - 0.5
-			time += stepInSeconds
-		}
-
-		result.Data[seriesIndex].Target = "test-series-" + strconv.Itoa(seriesIndex)
-		result.Data[seriesIndex].DataPoints = points
+func (hs *HTTPServer) handleQueryMetricsError(err error) *response.NormalResponse {
+	if errors.Is(err, datasources.ErrDataSourceAccessDenied) {
+		return response.Error(http.StatusForbidden, "Access denied to data source", err)
+	}
+	if errors.Is(err, datasources.ErrDataSourceNotFound) {
+		return response.Error(http.StatusNotFound, "Data source not found", err)
 	}
 
-	return Json(200, &result)
+	var secretsPlugin datasources.ErrDatasourceSecretsPluginUserFriendly
+	if errors.As(err, &secretsPlugin) {
+		return response.Error(http.StatusInternalServerError, fmt.Sprint("Secrets Plugin error: ", err.Error()), err)
+	}
+
+	return response.ErrOrFallback(http.StatusInternalServerError, "Query data error", err)
 }
 
-func GetInternalMetrics(c *middleware.Context) Response {
-	if metrics.UseNilMetrics {
-		return Json(200, util.DynMap{"message": "Metrics disabled"})
+// QueryMetricsV2 returns query metrics.
+// swagger:route POST /ds/query ds queryMetricsWithExpressions
+//
+// DataSource query metrics with expressions.
+//
+// If you are running Grafana Enterprise and have Fine-grained access control enabled
+// you need to have a permission with action: `datasources:query`.
+//
+// Responses:
+// 200: queryMetricsWithExpressionsRespons
+// 207: queryMetricsWithExpressionsRespons
+// 401: unauthorisedError
+// 400: badRequestError
+// 403: forbiddenError
+// 500: internalServerError
+func (hs *HTTPServer) QueryMetricsV2(c *contextmodel.ReqContext) response.Response {
+	reqDTO := dtos.MetricRequest{}
+	if err := web.Bind(c.Req, &reqDTO); err != nil {
+		return response.Error(http.StatusBadRequest, "bad request data", err)
 	}
 
-	snapshots := metrics.MetricStats.GetSnapshots()
+	resp, err := hs.queryDataService.QueryData(c.Req.Context(), c.SignedInUser, c.SkipDSCache, reqDTO)
+	if err != nil {
+		return hs.handleQueryMetricsError(err)
+	}
+	return hs.toJsonStreamingResponse(c.Req.Context(), resp)
+}
 
-	resp := make(map[string]interface{})
+func (hs *HTTPServer) toJsonStreamingResponse(ctx context.Context, qdr *backend.QueryDataResponse) response.Response {
+	statusWhenError := http.StatusBadRequest
+	if hs.Features.IsEnabled(ctx, featuremgmt.FlagDatasourceQueryMultiStatus) {
+		statusWhenError = http.StatusMultiStatus
+	}
 
-	for _, m := range snapshots {
-		metricName := m.Name() + m.StringifyTags()
-
-		switch metric := m.(type) {
-		case metrics.Counter:
-			resp[metricName] = map[string]interface{}{
-				"count": metric.Count(),
-			}
-		case metrics.Timer:
-			percentiles := metric.Percentiles([]float64{0.25, 0.75, 0.90, 0.99})
-			resp[metricName] = map[string]interface{}{
-				"count": metric.Count(),
-				"min":   metric.Min(),
-				"max":   metric.Max(),
-				"mean":  metric.Mean(),
-				"std":   metric.StdDev(),
-				"p25":   percentiles[0],
-				"p75":   percentiles[1],
-				"p90":   percentiles[2],
-				"p99":   percentiles[3],
-			}
+	statusCode := http.StatusOK
+	for _, res := range qdr.Responses {
+		if res.Error != nil {
+			statusCode = statusWhenError
 		}
 	}
 
-	var b []byte
-	var err error
-	if b, err = json.MarshalIndent(resp, "", " "); err != nil {
-		return ApiError(500, "body json marshal", err)
+	if statusCode == statusWhenError {
+		// an error in the response we treat as downstream.
+		requestmeta.WithDownstreamStatusSource(ctx)
 	}
 
-	return &NormalResponse{
-		body:   b,
-		status: 200,
-		header: http.Header{
-			"Content-Type": []string{"application/json"},
-		},
-	}
+	return response.JSONStreaming(statusCode, qdr)
 }
 
-// Genereates a index out of range error
-func GenerateError(c *middleware.Context) Response {
-	var array []string
-	return Json(200, array[20])
+// swagger:parameters queryMetricsWithExpressions
+type QueryMetricsWithExpressionsBodyParams struct {
+	// in:body
+	// required:true
+	Body dtos.MetricRequest `json:"body"`
+}
+
+// swagger:response queryMetricsWithExpressionsRespons
+type QueryMetricsWithExpressionsRespons struct {
+	// The response message
+	// in: body
+	Body *backend.QueryDataResponse `json:"body"`
 }

@@ -1,28 +1,47 @@
 package commands
 
 import (
-	"archive/zip"
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"net/http"
 	"os"
-	"path"
-	"regexp"
+	"runtime"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/fatih/color"
+
 	"github.com/grafana/grafana/pkg/cmd/grafana-cli/logger"
-	m "github.com/grafana/grafana/pkg/cmd/grafana-cli/models"
-	s "github.com/grafana/grafana/pkg/cmd/grafana-cli/services"
+	"github.com/grafana/grafana/pkg/cmd/grafana-cli/models"
+	"github.com/grafana/grafana/pkg/cmd/grafana-cli/services"
+	"github.com/grafana/grafana/pkg/cmd/grafana-cli/utils"
+	"github.com/grafana/grafana/pkg/plugins"
+	"github.com/grafana/grafana/pkg/plugins/repo"
+	"github.com/grafana/grafana/pkg/plugins/storage"
 )
 
-func validateInput(c CommandLine, pluginFolder string) error {
-	arg := c.Args().First()
+const installArgsSize = 2
+
+func validateInput(c utils.CommandLine) error {
+	args := c.Args()
+	argsLen := args.Len()
+
+	if argsLen > installArgsSize {
+		logger.Info(color.RedString("Please specify the correct format. For example ./grafana cli (<command arguments>) plugins install <plugin ID> (<plugin version>)\n\n"))
+		return errors.New("install only supports 2 arguments: plugin and version")
+	}
+
+	arg := args.First()
 	if arg == "" {
 		return errors.New("please specify plugin to install")
+	}
+
+	if argsLen == installArgsSize {
+		version := args.Get(1)
+		_, err := semver.NewVersion(version)
+		if err != nil {
+			logger.Info(color.YellowString("The provided version doesn't use semantic versioning format\n\n"))
+		}
 	}
 
 	pluginsDir := c.PluginDirectory()
@@ -33,7 +52,7 @@ func validateInput(c CommandLine, pluginFolder string) error {
 	fileInfo, err := os.Stat(pluginsDir)
 	if err != nil {
 		if err = os.MkdirAll(pluginsDir, os.ModePerm); err != nil {
-			return errors.New(fmt.Sprintf("pluginsDir (%s) is not a directory", pluginsDir))
+			return fmt.Errorf("pluginsDir (%s) is not a writable directory", pluginsDir)
 		}
 		return nil
 	}
@@ -45,144 +64,121 @@ func validateInput(c CommandLine, pluginFolder string) error {
 	return nil
 }
 
-func installCommand(c CommandLine) error {
-	pluginFolder := c.PluginDirectory()
-	if err := validateInput(c, pluginFolder); err != nil {
-		return err
-	}
-
-	pluginToInstall := c.Args().First()
-	version := c.Args().Get(1)
-
-	return InstallPlugin(pluginToInstall, version, c)
+func logRestartNotice() {
+	logger.Info(color.GreenString("Please restart Grafana after installing or removing plugins. Refer to Grafana documentation for instructions if necessary.\n\n"))
 }
 
-func InstallPlugin(pluginName, version string, c CommandLine) error {
-	plugin, err := s.GetPlugin(pluginName, c.RepoDirectory())
-	pluginFolder := c.PluginDirectory()
-	if err != nil {
+func installCommand(c utils.CommandLine) error {
+	if err := validateInput(c); err != nil {
 		return err
 	}
 
-	v, err := SelectVersion(plugin, version)
-	if err != nil {
-		return err
+	pluginID := c.Args().First()
+	version := c.Args().Get(1)
+	err := installPlugin(context.Background(), pluginID, version, c)
+	if err == nil {
+		logRestartNotice()
 	}
-
-	if version == "" {
-		version = v.Version
-	}
-
-	downloadURL := fmt.Sprintf("%s/%s/versions/%s/download",
-		c.GlobalString("repo"),
-		pluginName,
-		version)
-
-	logger.Infof("installing %v @ %v\n", plugin.Id, version)
-	logger.Infof("from url: %v\n", downloadURL)
-	logger.Infof("into: %v\n", pluginFolder)
-	logger.Info("\n")
-
-	err = downloadFile(plugin.Id, pluginFolder, downloadURL)
-	if err != nil {
-		return err
-	}
-
-	logger.Infof("%s Installed %s successfully \n", color.GreenString("✔"), plugin.Id)
-
-	/* Enable once we need support for downloading depedencies
-	res, _ := s.ReadPlugin(pluginFolder, pluginName)
-	for _, v := range res.Dependency.Plugins {
-		InstallPlugin(v.Id, version, c)
-		log.Infof("Installed dependency: %v ✔\n", v.Id)
-	}
-	*/
 	return err
 }
 
-func SelectVersion(plugin m.Plugin, version string) (m.Version, error) {
-	if version == "" {
-		return plugin.Versions[0], nil
-	}
-
-	for _, v := range plugin.Versions {
-		if v.Version == version {
-			return v, nil
+// installPlugin downloads the plugin code as a zip file from the Grafana.com API
+// and then extracts the zip into the plugin's directory.
+func installPlugin(ctx context.Context, pluginID, version string, c utils.CommandLine) error {
+	// If a version is specified, check if it is already installed
+	if version != "" {
+		if services.PluginVersionInstalled(pluginID, version, c.PluginDirectory()) {
+			services.Logger.Successf("Plugin %s v%s already installed.", pluginID, version)
+			return nil
 		}
 	}
 
-	return m.Version{}, errors.New("Could not find the version your looking for")
+	repository := repo.NewManager(repo.ManagerCfg{
+		SkipTLSVerify: c.Bool("insecure"),
+		BaseURL:       c.PluginRepoURL(),
+		Logger:        services.Logger,
+	})
+
+	compatOpts := repo.NewCompatOpts(services.GrafanaVersion, runtime.GOOS, runtime.GOARCH)
+
+	var archive *repo.PluginArchive
+	var err error
+	pluginZipURL := c.PluginURL()
+	if pluginZipURL != "" {
+		if archive, err = repository.GetPluginArchiveByURL(ctx, pluginZipURL, compatOpts); err != nil {
+			return err
+		}
+	} else {
+		if archive, err = repository.GetPluginArchive(ctx, pluginID, version, compatOpts); err != nil {
+			return err
+		}
+	}
+
+	pluginFs := storage.FileSystem(services.Logger, c.PluginDirectory())
+	extractedArchive, err := pluginFs.Extract(ctx, pluginID, storage.SimpleDirNameGeneratorFunc, archive.File)
+	if err != nil {
+		return err
+	}
+
+	for _, dep := range extractedArchive.Dependencies {
+		services.Logger.Infof("Fetching %s dependency...", dep.ID)
+		d, err := repository.GetPluginArchive(ctx, dep.ID, dep.Version, compatOpts)
+		if err != nil {
+			return fmt.Errorf("%v: %w", fmt.Sprintf("failed to download plugin %s from repository", dep.ID), err)
+		}
+
+		_, err = pluginFs.Extract(ctx, dep.ID, storage.SimpleDirNameGeneratorFunc, d.File)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func RemoveGitBuildFromName(pluginName, filename string) string {
-	r := regexp.MustCompile("^[a-zA-Z0-9_.-]*/")
-	return r.ReplaceAllString(filename, pluginName+"/")
-}
-
-var retryCount = 0
-var permissionsDeniedMessage = "Could not create %s. Permission denied. Make sure you have write access to plugindir"
-
-func downloadFile(pluginName, filePath, url string) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			retryCount++
-			if retryCount < 3 {
-				fmt.Println("Failed downloading. Will retry once.")
-				err = downloadFile(pluginName, filePath, url)
-			} else {
-				failure := fmt.Sprintf("%v", r)
-				if failure == "runtime error: makeslice: len out of range" {
-					err = fmt.Errorf("Corrupt http response from source. Please try again.\n")
-				} else {
-					panic(r)
+// uninstallPlugin removes the plugin directory
+func uninstallPlugin(_ context.Context, pluginID string, c utils.CommandLine) error {
+	for _, bundle := range services.GetLocalPlugins(c.PluginDirectory()) {
+		if bundle.Primary.JSONData.ID == pluginID {
+			logger.Infof("Removing plugin: %v\n", pluginID)
+			if remover, ok := bundle.Primary.FS.(plugins.FSRemover); ok {
+				logger.Debugf("Removing directory %v\n\n", bundle.Primary.FS.Base())
+				if err := remover.Remove(); err != nil {
+					return err
 				}
+				return nil
+			} else {
+				return fmt.Errorf("plugin %v is immutable and therefore cannot be uninstalled", pluginID)
 			}
-		}
-	}()
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	r, err := zip.NewReader(bytes.NewReader(body), resp.ContentLength)
-	if err != nil {
-		return err
-	}
-	for _, zf := range r.File {
-		newFile := path.Join(filePath, RemoveGitBuildFromName(pluginName, zf.Name))
-
-		if zf.FileInfo().IsDir() {
-			err := os.Mkdir(newFile, 0777)
-			if PermissionsError(err) {
-				return fmt.Errorf(permissionsDeniedMessage, newFile)
-			}
-		} else {
-			dst, err := os.Create(newFile)
-			if PermissionsError(err) {
-				return fmt.Errorf(permissionsDeniedMessage, newFile)
-			}
-
-			src, err := zf.Open()
-			if err != nil {
-				logger.Errorf("Failed to extract file: %v", err)
-			}
-
-			io.Copy(dst, src)
-			dst.Close()
-			src.Close()
 		}
 	}
 
 	return nil
 }
 
-func PermissionsError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "permission denied")
+func osAndArchString() string {
+	osString := strings.ToLower(runtime.GOOS)
+	arch := runtime.GOARCH
+	return osString + "-" + arch
+}
+
+func supportsCurrentArch(version models.Version) bool {
+	if version.Arch == nil {
+		return true
+	}
+	for arch := range version.Arch {
+		if arch == osAndArchString() || arch == "any" {
+			return true
+		}
+	}
+	return false
+}
+
+func latestSupportedVersion(plugin models.Plugin) *models.Version {
+	for _, v := range plugin.Versions {
+		ver := v
+		if supportsCurrentArch(ver) {
+			return &ver
+		}
+	}
+	return nil
 }
